@@ -10,6 +10,7 @@ def _make_board(tmp_path, name, tasks):
     board_root.mkdir(parents=True)
     db = board_root / 'kanban.db'
     conn = sqlite3.connect(db)
+    conn.execute('PRAGMA journal_mode=DELETE')
     conn.execute("""CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY, title TEXT, body TEXT, status TEXT,
         created_at INTEGER, updated_at INTEGER, completed_at INTEGER, metadata TEXT)""")
@@ -43,8 +44,12 @@ def test_archive_is_dry_run_by_default(tmp_path, monkeypatch):
 
 
 def test_archive_removes_from_db_when_execute(tmp_path, monkeypatch):
-    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
-    board = _make_board(tmp_path, 'testboard', [
+    # Use a temp path OUTSIDE the real kanban tree so archive_plan only
+    # sees our test board and doesn't open the 7 production board DBs.
+    isolated = tmp_path / 'boards'
+    isolated.mkdir()
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(isolated))
+    board = _make_board(isolated, 'testboard', [
         {'id': 't002', 'status': 'done',
          'completed_at': int(time.time()) - 86400 * 60},
     ])

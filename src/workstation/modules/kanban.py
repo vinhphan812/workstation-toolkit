@@ -8,25 +8,41 @@ from workstation.core.safety import require_execute
 
 
 def _boards_root() -> Path:
+    """Return the Kanban boards root.
+
+    When HERMES_KANBAN_HOME is set it is used directly (isolated test
+    environments).  Otherwise the default path is derived from the Hermes
+    profile home.
+    """
     if 'HERMES_KANBAN_HOME' in os.environ:
         return Path(os.environ['HERMES_KANBAN_HOME'])
     return Path(get_hermes_home()).parent.parent / 'kanban' / 'boards'
 
 
+def _board_db_paths(boards_root: Path) -> list[tuple[Path, Path]]:
+    """Yield (board_name, db_path) for boards that have a kanban.db."""
+    if not boards_root.is_dir():
+        return []
+    results = []
+    for board in sorted(boards_root.iterdir()):
+        if board.is_dir():
+            db = board / 'kanban.db'
+            if db.is_file():
+                results.append((board, db))
+    return results
+
+
 def kanban_health() -> dict:
-    root = _boards_root()
+    boards_root = _boards_root()
     boards = []
-    if not root.is_dir():
-        return {'status': 'unavailable', 'boards_root': str(root), 'boards': []}
-    for board in sorted(path for path in root.iterdir() if path.is_dir()):
-        db = board / 'kanban.db'
-        if not db.is_file():
-            continue
+    if not boards_root.is_dir():
+        return {'status': 'unavailable', 'boards_root': str(boards_root), 'boards': []}
+    for board, db in _board_db_paths(boards_root):
         board_info = {'name': board.name, 'database': str(db), 'size_mb': round(db.stat().st_size/(1024**2),2),
                       'wal_mb': round(_size(Path(str(db)+'-wal'))/(1024**2),2), 'integrity': None, 'statuses': {}, 'done_before_cutoff': 0}
         try:
-            conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=2)
-            conn.execute('pragma busy_timeout=2000')
+            conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
+            conn.execute('pragma busy_timeout=30000')
             board_info['integrity'] = conn.execute('pragma quick_check(1)').fetchone()[0]
             table_exists = conn.execute("select 1 from sqlite_master where type='table' and name='tasks'").fetchone()
             if not table_exists:
@@ -41,7 +57,7 @@ def kanban_health() -> dict:
         except Exception as exc:
             board_info['integrity'] = f'unavailable: {exc}'
         boards.append(board_info)
-    return {'status': 'available', 'boards_root': str(root), 'boards': boards}
+    return {'status': 'available', 'boards_root': str(boards_root), 'boards': boards}
 
 
 def archive_plan(days: int = 30) -> dict:
@@ -51,7 +67,7 @@ def archive_plan(days: int = 30) -> dict:
     candidates = []
     for board in health.get('boards', []):
         try:
-            conn = sqlite3.connect(f"file:{board['database']}?mode=ro", uri=True, timeout=2)
+            conn = sqlite3.connect(f"file:{board['database']}?mode=ro", uri=True, timeout=30)
             has_tasks = conn.execute("select 1 from sqlite_master where type='table' and name='tasks'").fetchone()
             if not has_tasks:
                 conn.close()
@@ -85,18 +101,21 @@ def print_archive_plan(plan: dict) -> None:
 
 
 def _archive_task(board_name: str, task_id: str, execute: bool = False) -> dict:
-    """Export one task row + metadata to JSON under <board>/archive/YYYY-MM/ and
-    delete it from the live database when execute=True."""
+    """Read all columns from the actual kanban tasks table, export to JSON under
+    <board>/archive/YYYY-MM/, and DELETE from live DB when execute=True."""
     board_root = _boards_root() / board_name
     db = board_root / 'kanban.db'
+    # One shared read connection; column names from description so we are
+    # schema-resilient regardless of which columns the real board has.
     conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=2)
-    row = conn.execute(
-        'SELECT id, title, body, status, created_at, updated_at, completed_at, metadata '
-        'FROM tasks WHERE id=?', (task_id,)).fetchone()
-    conn.close()
+    try:
+        cur = conn.execute('SELECT * FROM tasks WHERE id=? LIMIT 1', (task_id,))
+        cols = [d[0] for d in cur.description]
+        row = conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+    finally:
+        conn.close()
     if not row:
         return {'task_id': task_id, 'skipped': True, 'reason': 'not found in database'}
-    cols = ['id', 'title', 'body', 'status', 'created_at', 'updated_at', 'completed_at', 'metadata']
     task = dict(zip(cols, row))
     done_ts = task.get('completed_at')
     year_month = datetime.fromtimestamp(done_ts, tz=timezone.utc).strftime('%Y-%m') if done_ts else 'unknown'
@@ -107,10 +126,13 @@ def _archive_task(board_name: str, task_id: str, execute: bool = False) -> dict:
     archive_dir.mkdir(parents=True, exist_ok=True)
     with open(archive_file, 'w', encoding='utf-8') as fh:
         json.dump(task, fh, indent=2, default=str)
-    conn2 = sqlite3.connect(db, timeout=10)
-    conn2.execute('DELETE FROM tasks WHERE id=?', (task_id,))
-    conn2.commit()
-    conn2.close()
+    conn_del = sqlite3.connect(db, timeout=30)
+    conn_del.execute('PRAGMA busy_timeout=30000')
+    try:
+        conn_del.execute('DELETE FROM tasks WHERE id=?', (task_id,))
+        conn_del.commit()
+    finally:
+        conn_del.close()
     return {'task_id': task_id, 'archived_to': str(archive_file)}
 
 

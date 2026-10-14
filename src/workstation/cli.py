@@ -174,11 +174,11 @@ def cmd_project(args):
 
 
 def cmd_kanban(args):
-    from workstation.modules.kanban import kanban_health, archive_candidates, archive_tasks
+    from workstation.modules.kanban import kanban_health, archive_plan, archive_tasks
     if args.archive and args.archive_execute:
         report = archive_tasks(args.archive, board=args.board, execute=args.archive_execute, yes=args.yes)
     elif args.archive:
-        report = archive_candidates(args.archive)
+        report = archive_plan(args.archive)
     else:
         report = kanban_health()
     print(json.dumps(report, indent=2))
