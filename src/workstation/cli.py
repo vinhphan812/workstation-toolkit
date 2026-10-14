@@ -172,6 +172,19 @@ def cmd_project(args):
 
 
 
+
+def cmd_kanban(args):
+    from workstation.modules.kanban import kanban_health, archive_candidates, archive_tasks
+    if args.archive and args.archive_execute:
+        report = archive_tasks(args.archive, board=args.board, execute=args.archive_execute, yes=args.yes)
+    elif args.archive:
+        report = archive_candidates(args.archive)
+    else:
+        report = kanban_health()
+    print(json.dumps(report, indent=2))
+    _emit(report, args, f"kanban_{args.board or 'all'}")
+    if not report.get("ok"): raise SystemExit(1)
+
 def cmd_loc(args):
     from workstation.modules.loc import loc_audit, print_loc
     from workstation.modules.projects import project_status
@@ -257,7 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("repos", help="Repository status audit"); p.add_argument("--stale-branches", action="store_true"); p.set_defaults(func=cmd_repos)
     p = sub.add_parser("toolchain", help="Developer toolchain audit"); p.add_argument("--java", action="store_true"); p.add_argument("--android", action="store_true"); p.set_defaults(func=cmd_toolchain)
     sub.add_parser("forecast", help="Disk pressure and managed-artifact forecast").set_defaults(func=cmd_forecast)
-    p = sub.add_parser("kanban", help="Read-only Kanban health and archive planning"); p.add_argument("--archive-plan", type=int, metavar="DAYS", help="List done tasks older than DAYS; does not archive"); p.set_defaults(func=cmd_kanban)
+    p = sub.add_parser("kanban", help="Kanban health and optional archiving"); p.add_argument("--archive-plan", type=int, metavar="DAYS", dest="archive", help="List done tasks older than DAYS; omit --execute to preview"); p.add_argument("--board", help="Filter to one board"); p.add_argument("--execute", dest="archive_execute", action="store_true", help="Execute the archive (requires --archive-plan DAYS)"); p.add_argument("-y", "--yes", action="store_true"); p.set_defaults(func=cmd_kanban)
     p = sub.add_parser("project", help="Config-driven project status and commands"); p.add_argument("project", nargs="?", help="Project name; omit for all statuses"); p.add_argument("project_action", choices=["status", "test", "lint", "clean", "web-test"], default="status", nargs="?"); p.add_argument("--execute", action="store_true", help="Actually run configured command; default is dry-run"); p.set_defaults(func=cmd_project)
     p = sub.add_parser("loc", help="Source LOC audit and report"); group = p.add_mutually_exclusive_group(required=True); group.add_argument("--path"); group.add_argument("--project"); p.add_argument("--include-config", action="store_true"); p.add_argument("--top", type=int, default=20); p.set_defaults(func=cmd_loc)
     p = sub.add_parser("backup", help="Backup local config and Hermes state database"); p.add_argument("--label", default="workstation"); p.set_defaults(func=cmd_backup)

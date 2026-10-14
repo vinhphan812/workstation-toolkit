@@ -1,13 +1,16 @@
-"""Read-only Kanban board health and archive planning."""
+"""Kanban board health, archive planning, and selective archiving."""
 from __future__ import annotations
-import os, sqlite3
+import json, os, shutil, sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from workstation.config import get_hermes_home
+from workstation.core.safety import require_execute
 
 
 def _boards_root() -> Path:
-    return Path(os.environ.get('HERMES_KANBAN_HOME') or Path(get_hermes_home()).parent.parent / 'kanban' / 'boards')
+    if 'HERMES_KANBAN_HOME' in os.environ:
+        return Path(os.environ['HERMES_KANBAN_HOME'])
+    return Path(get_hermes_home()).parent.parent / 'kanban' / 'boards'
 
 
 def kanban_health() -> dict:
@@ -79,3 +82,71 @@ def print_archive_plan(plan: dict) -> None:
     print(f"\n=== Kanban Archive Plan (done > {plan['days']} days) ===")
     for board in plan['boards']:
         print(f"  {board['board']}: {board['count']} candidates")
+
+
+def _archive_task(board_name: str, task_id: str, execute: bool = False) -> dict:
+    """Export one task row + metadata to JSON under <board>/archive/YYYY-MM/ and
+    delete it from the live database when execute=True."""
+    board_root = _boards_root() / board_name
+    db = board_root / 'kanban.db'
+    conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=2)
+    row = conn.execute(
+        'SELECT id, title, body, status, created_at, updated_at, completed_at, metadata '
+        'FROM tasks WHERE id=?', (task_id,)).fetchone()
+    conn.close()
+    if not row:
+        return {'task_id': task_id, 'skipped': True, 'reason': 'not found in database'}
+    cols = ['id', 'title', 'body', 'status', 'created_at', 'updated_at', 'completed_at', 'metadata']
+    task = dict(zip(cols, row))
+    done_ts = task.get('completed_at')
+    year_month = datetime.fromtimestamp(done_ts, tz=timezone.utc).strftime('%Y-%m') if done_ts else 'unknown'
+    archive_dir = board_root / 'archive' / year_month
+    archive_file = archive_dir / f'{task_id}.json'
+    if not execute:
+        return {'task_id': task_id, 'action': 'dry_run', 'destination': str(archive_file)}
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    with open(archive_file, 'w', encoding='utf-8') as fh:
+        json.dump(task, fh, indent=2, default=str)
+    conn2 = sqlite3.connect(db, timeout=10)
+    conn2.execute('DELETE FROM tasks WHERE id=?', (task_id,))
+    conn2.commit()
+    conn2.close()
+    return {'task_id': task_id, 'archived_to': str(archive_file)}
+
+
+def archive_tasks(days: int = 30, board: str | None = None,
+                  execute: bool = False, yes: bool = False) -> dict:
+    """Export done tasks older than `days` to per-month JSON archives and remove
+    them from the live database.
+
+    Safety model:
+      - Always requires explicit --execute and --yes flags.
+      - Reads live DB but writes archive JSON + DELETE in a single transaction
+        per task; safe to interrupt.
+      - Never deletes the board database or the archive directory.
+    """
+    if execute:
+        require_execute(execute, yes, 'Kanban archive')
+    plan = archive_plan(days)
+    archived, skipped = [], []
+    for board_entry in plan['boards']:
+        bname = board_entry['board']
+        if board and bname != board:
+            continue
+        for task_info in board_entry.get('tasks', []):
+            result = _archive_task(bname, task_info['id'], execute=execute)
+            if execute:
+                if result.get('skipped'):
+                    skipped.append(result)
+                else:
+                    archived.append(result)
+            else:
+                archived.append(result)
+    return {
+        'days': days,
+        'board': board,
+        'execute': execute,
+        'archived_count': len(archived),
+        'skipped_count': len(skipped),
+        'results': archived + skipped,
+    }
