@@ -1,0 +1,16 @@
+{
+  "projects": [
+    {
+      "name": "example-project",
+      "path": "/absolute/path/to/project",
+      "type": "python",
+      "environment": {},
+      "commands": {
+        "status": "git status --short",
+        "test": "python -m pytest",
+        "lint": "python -m ruff check ."
+      },
+      "timeouts": {"test": 900, "lint": 300}
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "description": "Machine-local repositories; copy to repos.json and customise.",
+  "repos": ["/absolute/path/to/project"],
+  "exclude_patterns": [".brv", ".gradle", "node_modules", ".venv", "vendor"]
+}

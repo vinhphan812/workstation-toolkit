@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Local config (per-machine)
+config/local.toml
+config/repos.json
+config/projects.json
+
+# Test outputs
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Backups & reports
+backups/
+reports/
+
+# Virtual envs
+venv/
+.venv/

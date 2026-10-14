@@ -1,0 +1,17 @@
+# Project Manifests
+# Add projects to validate/clean via workstation validate <name>
+
+[[projects]]
+name = "example"
+path = "D:/projects/example"
+type = "node-typescript"
+validate = ["npm run typecheck", "npm test"]
+clean = ["npm run clean"]
+
+[[projects]]
+name = "mcp-java-sdk"
+path = "D:/android/mcp-java-sdk"
+type = "gradle-java"
+java_home = "C:/Java/jdk-17.0.5"
+validate = ["./gradlew.bat test"]
+clean = ["./gradlew.bat clean"]

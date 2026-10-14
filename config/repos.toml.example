@@ -1,0 +1,5 @@
+# Git Repositories
+# Auto-scanned from common roots. Add custom paths here.
+
+repos = []
+exclude_patterns = [".brv", "node_modules/.cache", ".venv", "vendor"]

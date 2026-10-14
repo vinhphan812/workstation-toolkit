@@ -1,0 +1,5 @@
+#!/bin/bash
+# Run toolkit from Linux/macOS
+cd "$(dirname "$0")/.."
+source .venv/bin/activate 2>/dev/null || true
+exec python -m workstation "$@"
