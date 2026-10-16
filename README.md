@@ -61,6 +61,11 @@ python -m workstation forecast
 # Heavy process audit (default: >=500 MB)
 python -m workstation process --threshold 1000
 
+# Anti-malware scan (heuristics: crypto miner, RAT, download-execute patterns, orphans)
+python -m workstation guard -t 100
+python -m workstation guard --kill-pid 12345 --execute   # kill (requires --execute)
+python -m workstation kill --name python --execute          # bulk kill by name
+
 # Repository hygiene
 python -m workstation repos
 python -m workstation repos --stale-branches

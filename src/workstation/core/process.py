@@ -1,7 +1,13 @@
 """Process inspection — cross-platform via psutil."""
-import psutil, os, time
+from __future__ import annotations
+
+import os
+import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
+
+import psutil
+
 
 @dataclass
 class ProcessInfo:
@@ -14,71 +20,117 @@ class ProcessInfo:
     parent_pid: int
     status: str
 
+
+# System processes never reported.
+EXCLUDED = {
+    "System", "Idle", "smss", "csrss", "wininit", "services", "lsass",
+    "Memory Compression", "Registry",
+}
+
+
 def list_processes(threshold_mb: int = 100) -> List[ProcessInfo]:
-    """List processes using more than threshold_mb of RAM."""
-    excluded = {"System", "Idle", "smss", "csrss", "wininit", "services", "lsass"}
-    results = []
-    for p in psutil.process_iter(["pid", "name", "memory_info", "cmdline", "cwd", "status", "ppid"]):
+    """List processes using more than threshold_mb of RAM.
+
+    Performance: two-phase approach.
+      Phase 1 iterates all processes asking only for pid/name/rss (fast).
+      Phase 2 opens a Process object only for candidates above threshold,
+    collecting extra metadata (cmdline, cwd, status, ppid) on-demand.
+    """
+    # Phase 1: fast filter
+    candidates: List[tuple[int, str, float]] = []
+    for proc in psutil.process_iter(["pid", "name", "memory_info"]):
         try:
-            info = p.info
-            ram_mb = info["memory_info"].rss / (1024**2)
+            info = proc.info
+            if info["name"] in EXCLUDED:
+                continue
+            ram_mb = info["memory_info"].rss / (1024 ** 2)
             if ram_mb < threshold_mb:
                 continue
-            if info["name"] in excluded:
-                continue
-            cmdline = " ".join(info["cmdline"]) if info["cmdline"] else ""
-            cwd = info["cwd"] or ""
+            candidates.append((info["pid"], info["name"], ram_mb))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
+    # Phase 2: enrich only heavy candidates
+    results: List[ProcessInfo] = []
+    for pid, name, ram_mb in candidates:
+        try:
+            p = psutil.Process(pid)
+            cmdline = " ".join(p.cmdline()) if p.cmdline() else ""
+            try:
+                cwd = p.cwd() or ""
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                cwd = ""
             results.append(ProcessInfo(
-                pid=info["pid"],
-                name=info["name"],
-                ram_mb=round(ram_mb, 1),
-                ram_gb=round(ram_mb / 1024, 2),
-                cmdline=cmdline[:120],
-                cwd=cwd,
-                parent_pid=info["ppid"],
-                status=info["status"],
+                pid=pid, name=name,
+                ram_mb=round(ram_mb, 1), ram_gb=round(ram_mb / 1024, 2),
+                cmdline=cmdline[:120], cwd=cwd,
+                parent_pid=p.ppid(), status=str(p.status()),
             ))
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
+
     results.sort(key=lambda x: x.ram_mb, reverse=True)
     return results
 
+
 def is_process_orphaned(proc: ProcessInfo) -> tuple[bool, str]:
-    """Check if process is orphaned: parent dead, or cmdline refs deleted path."""
-    # Command lines retain evidence even after their launching parent has
-    # exited. Normalise separators for Windows before checking them.
-    normalized_cmdline = proc.cmdline.replace("/", "\\")
-    if ".worktrees" in normalized_cmdline and "t_" in normalized_cmdline:
+    """Check if a process appears orphaned.
+
+    Evidence: worktree path in cmdline, missing cwd, or parent gone.
+    This is advisory, not a guaranteed zombie classification.
+    """
+    normalized = proc.cmdline.replace("/", "\\")
+    if ".worktrees" in normalized and "t_" in normalized:
         return True, "cmdline references orphaned worktree path"
-
-    import re
     for pattern in (r"worktree.*deleted", r"node_modules.*missing"):
-        if re.search(pattern, normalized_cmdline, flags=re.IGNORECASE):
+        if re.search(pattern, normalized, flags=re.IGNORECASE):
             return True, "cmdline references orphaned path"
-
-    # A missing parent is additional evidence only after checking the
-    # command line, which yields the more specific reason.
     try:
         psutil.Process(proc.parent_pid).name()
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return True, f"parent PID={proc.parent_pid} not found"
     except Exception:
         return True, f"parent PID={proc.parent_pid} unreachable"
-
-    # Check cwd exists
     if proc.cwd and not os.path.exists(proc.cwd):
         return True, f"cwd does not exist: {proc.cwd}"
-
     return False, ""
 
+
 def kill_process(pid: int) -> bool:
+    """Terminate a process. Returns True on success, False if
+    the process no longer exists or access is denied."""
     try:
-        p = psutil.Process(pid)
-        p.kill()
+        psutil.Process(pid).kill()
         return True
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return False
 
-def find_by_name(name: str) -> List[ProcessInfo]:
-    """Find all processes matching name (substring)."""
-    return [p for p in list_processes(1) if name.lower() in p.name.lower()]
+
+def find_by_name(name: str, threshold_mb: int = 1) -> List[ProcessInfo]:
+    """Return processes whose name contains the given substring."""
+    return [p for p in list_processes(threshold_mb)
+             if name.lower() in p.name.lower()]
+
+
+def kill_by_name(name: str, *, execute: bool = False) -> dict:
+    """Find processes by name and optionally terminate them.
+
+    Safety model:
+      - Always dry-run by default (lists PIDs, never kills).
+      - Pass execute=True to actually terminate.
+    """
+    matches = find_by_name(name)
+    result = {
+        "found":      [{"pid": p.pid, "name": p.name, "ram_mb": p.ram_mb}
+                          for p in matches],
+        "terminated":  [],
+        "skipped":     [],
+        "dry_run":     not execute,
+    }
+    if not execute:
+        return result
+    for proc in matches:
+        success = kill_process(proc.pid)
+        (result["terminated"] if success else result["skipped"]
+         ).append(proc.pid)
+    return result

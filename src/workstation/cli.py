@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from workstation.config import load_repos
 from workstation.core.reporting import write_report
@@ -24,6 +25,29 @@ def cmd_diagnose(args):
     _emit(report, args, "diagnose")
 
 
+def cmd_guard(args):
+    from workstation.modules.guard import guard_audit, kill_findings, print_guard_report
+    from workstation.modules.guard import Finding
+    if args.kill_pid:
+        from workstation.modules.guard import kill_finding
+        result = {"dry_run": not args.execute,
+                  "killed":  [args.kill_pid] if args.execute and kill_finding(args.kill_pid) else [],
+                  "skipped": [] if args.execute and kill_finding(args.kill_pid) else [args.kill_pid]}
+        print(f"{'DRY RUN' if not args.execute else 'EXECUTED'}: kill PID={args.kill_pid}")
+        print(json.dumps(result, indent=2, default=str))
+        _emit(result, args, f"guard_kill_{args.kill_pid}")
+        return
+    report = guard_audit(
+        threshold_mb=args.threshold,
+        include_clean=args.include_clean,
+        check_network=not args.no_network,
+    )
+    print_guard_report(report)
+    _emit(report, args, "guard_audit")
+
+
+
+
 def cmd_storage(args):
     from workstation.modules import system
     report = system.storage_audit()
@@ -31,12 +55,30 @@ def cmd_storage(args):
     _emit(report, args, "storage")
 
 
+def cmd_kill(args):
+    from workstation.core.process import find_by_name, kill_by_name
+    if args.name:
+        result = kill_by_name(args.name, execute=args.execute)
+    elif args.pid:
+        from workstation.core.process import kill_process
+        result = {"dry_run": not args.execute,
+                   "terminated": [args.pid] if args.execute and kill_process(args.pid) else [],
+                   "skipped": [] if args.execute and kill_process(args.pid) else [args.pid],
+                   "found": [{"pid": args.pid}]}
+    else:
+        raise SystemExit("--name or --pid is required")
+    print(json.dumps(result, indent=2, default=str))
+    _emit(result, args, f"kill_{args.name or str(args.pid)}")
+
 def cmd_process(args):
     from workstation.core.process import list_processes, is_process_orphaned
     processes = []
     print(f"\n=== Heavy Processes (>{args.threshold} MB) ===")
     for proc in list_processes(args.threshold):
-        orphaned, reason = is_process_orphaned(proc)
+        # Orphan checks can require parent/cwd access and may block on a
+        # protected Windows process. The default scan therefore stays bounded
+        # and marks potential orphans only when explicitly requested.
+        orphaned, reason = (is_process_orphaned(proc) if args.check_orphans else (False, "not checked; use --check-orphans"))
         item = {**proc.__dict__, "orphaned": orphaned, "reason": reason}
         processes.append(item)
         print(f"  {proc.ram_gb:>5.2f} GB  {proc.name} PID={proc.pid}{' ORPHANED' if orphaned else ''}")
@@ -260,8 +302,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("diagnose", help="Full system diagnostic").set_defaults(func=cmd_diagnose)
     sub.add_parser("storage", help="Mounted drive capacity audit").set_defaults(func=cmd_storage)
-    p = sub.add_parser("process", help="Heavy process audit"); p.add_argument("-t", "--threshold", type=int, default=500); p.set_defaults(func=cmd_process)
+    p = sub.add_parser("guard", help="Anti-malware process scanner"); p.add_argument("-t", "--threshold", type=int, default=50, help="Min RAM (MB) to scan (default 50)"); p.add_argument("--include-clean", action="store_true"); p.add_argument("--no-network", action="store_true"); p.add_argument("--kill-pid", type=int, help="Kill a specific PID"); p.add_argument("--execute", action="store_true"); p.set_defaults(func=cmd_guard)
+    p = sub.add_parser("process", help="Heavy process audit"); p.add_argument("-t", "--threshold", type=int, default=500); p.add_argument("--check-orphans", action="store_true", help="Check parent/cwd evidence for orphaned processes (may be slower)"); p.set_defaults(func=cmd_process)
     p = sub.add_parser("git-identity", help="Git identity audit"); p.add_argument("--fix", action="store_true"); p.set_defaults(func=cmd_git_identity)
+    p = sub.add_parser("kill", help="Find and terminate processes by name or PID"); p.add_argument("--name", help="Process name substring"); p.add_argument("--pid", type=int, help="Kill by PID directly"); p.add_argument("--execute", action="store_true", help="Actually kill (dry-run by default)"); p.set_defaults(func=cmd_kill)
     p = sub.add_parser("git-worktrees", help="Git worktree audit"); p.add_argument("--execute", action="store_true"); p.add_argument("-y", "--yes", action="store_true"); p.set_defaults(func=cmd_git_worktrees)
     p = sub.add_parser("docker", help="Docker audit and explicit cleanup"); p.add_argument("--prune", action="store_true"); p.add_argument("--images", action="store_true"); p.add_argument("--volumes", action="store_true"); p.add_argument("-y", "--yes", action="store_true"); p.set_defaults(func=cmd_docker)
     p = sub.add_parser("docker-health", help="Running Docker services and recent logs"); p.add_argument("--lines", type=int, default=30); p.set_defaults(func=cmd_docker_health)
