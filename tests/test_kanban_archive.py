@@ -100,3 +100,20 @@ def test_archive_plan_is_read_only(tmp_path, monkeypatch):
     count = conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0]
     conn.close()
     assert count == 1
+
+
+def test_archive_export_matches_row_deleted_in_transaction(tmp_path, monkeypatch):
+    isolated = tmp_path / 'boards'
+    isolated.mkdir()
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(isolated))
+    board = _make_board(isolated, 'atomic-board', [
+        {'id': 'atomic', 'title': 'original', 'status': 'done',
+         'completed_at': int(time.time()) - 86400 * 60}])
+
+    result = archive_tasks(30, execute=True, yes=True)
+
+    archived = json.loads(Path(result['results'][0]['archived_to']).read_text())
+    assert archived['id'] == 'atomic'
+    assert archived['title'] == 'original'
+    with sqlite3.connect(board / 'kanban.db') as conn:
+        assert conn.execute('SELECT COUNT(*) FROM tasks WHERE id=?', ('atomic',)).fetchone()[0] == 0
