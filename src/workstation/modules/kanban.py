@@ -105,34 +105,37 @@ def _archive_task(board_name: str, task_id: str, execute: bool = False) -> dict:
     <board>/archive/YYYY-MM/, and DELETE from live DB when execute=True."""
     board_root = _boards_root() / board_name
     db = board_root / 'kanban.db'
-    # One shared read connection; column names from description so we are
-    # schema-resilient regardless of which columns the real board has.
-    conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=2)
+    # Reserve the write lock before reading to avoid a DELETE-journal lock
+    # upgrade race between export and deletion.
+    conn = sqlite3.connect(db, timeout=30, isolation_level=None)
+    conn.execute('PRAGMA busy_timeout=30000')
     try:
+        conn.execute('BEGIN IMMEDIATE')
         cur = conn.execute('SELECT * FROM tasks WHERE id=? LIMIT 1', (task_id,))
         cols = [d[0] for d in cur.description]
-        row = conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+        row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            return {'task_id': task_id, 'skipped': True, 'reason': 'not found in database'}
+        task = dict(zip(cols, row))
+        done_ts = task.get('completed_at')
+        year_month = datetime.fromtimestamp(done_ts, tz=timezone.utc).strftime('%Y-%m') if done_ts else 'unknown'
+        archive_dir = board_root / 'archive' / year_month
+        archive_file = archive_dir / f'{task_id}.json'
+        if not execute:
+            conn.rollback()
+            return {'task_id': task_id, 'action': 'dry_run', 'destination': str(archive_file)}
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        with open(archive_file, 'w', encoding='utf-8') as fh:
+            json.dump(task, fh, indent=2, default=str)
+        conn.execute('DELETE FROM tasks WHERE id=?', (task_id,))
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     finally:
         conn.close()
-    if not row:
-        return {'task_id': task_id, 'skipped': True, 'reason': 'not found in database'}
-    task = dict(zip(cols, row))
-    done_ts = task.get('completed_at')
-    year_month = datetime.fromtimestamp(done_ts, tz=timezone.utc).strftime('%Y-%m') if done_ts else 'unknown'
-    archive_dir = board_root / 'archive' / year_month
-    archive_file = archive_dir / f'{task_id}.json'
-    if not execute:
-        return {'task_id': task_id, 'action': 'dry_run', 'destination': str(archive_file)}
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    with open(archive_file, 'w', encoding='utf-8') as fh:
-        json.dump(task, fh, indent=2, default=str)
-    conn_del = sqlite3.connect(db, timeout=30)
-    conn_del.execute('PRAGMA busy_timeout=30000')
-    try:
-        conn_del.execute('DELETE FROM tasks WHERE id=?', (task_id,))
-        conn_del.commit()
-    finally:
-        conn_del.close()
     return {'task_id': task_id, 'archived_to': str(archive_file)}
 
 
