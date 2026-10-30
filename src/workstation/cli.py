@@ -221,6 +221,8 @@ def cmd_restore(args):
         raise SystemExit(str(exc))
     print(json.dumps(report, indent=2))
     _emit(report, args, "restore")
+    if not report.get('ok', True):
+        raise SystemExit(1)
 
 
 def cmd_hermes_maintain(args):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json, os, shutil, sqlite3, subprocess
 from pathlib import Path
 from workstation.config import TOOLKIT_ROOT, get_hermes_profile, get_hermes_home
-from workstation.core.backup import backup_files
+from workstation.core.backup import _sha256, backup_files
 from workstation.core.safety import require_execute, require_free_space
 
 
@@ -18,10 +18,30 @@ def create_backup(label: str = 'workstation') -> dict:
     return backup_files(label, default_backup_targets())
 
 
+def _unique_path(path: Path) -> Path:
+    """Return `path` or the first free `path.N` variant; never clobber evidence."""
+    if not path.exists():
+        return path
+    index = 1
+    while True:
+        candidate = path.with_name(f'{path.name}.{index}')
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
 def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False) -> dict:
+    """Restore files listed in a backup manifest.
+
+    Each file is staged next to its destination and verified before it is put in
+    place, so a corrupted copy never replaces good data. A post-copy checksum
+    mismatch is reported as a failure (`failed` + `ok: False`) and both the
+    backup archive and the corrupted staged copy are kept as recovery
+    evidence; the original destination is left untouched.
+    """
     require_execute(execute, yes, 'restore')
     manifest = json.loads(Path(manifest_path).read_text(encoding='utf-8'))
-    restored, skipped = [], []
+    restored, skipped, failed = [], [], []
     for entry in manifest.get('files', []):
         if entry.get('status') != 'backed_up':
             skipped.append(entry)
@@ -30,19 +50,37 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False)
         if not backup.is_file():
             skipped.append({**entry, 'reason': 'backup missing'})
             continue
-        from workstation.core.backup import _sha256
         expected = entry.get('sha256')
         actual = _sha256(backup)
         if expected and actual != expected:
             skipped.append({**entry, 'reason': 'checksum mismatch', 'actual_sha256': actual})
             continue
         source.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(backup, source)
-        if expected and _sha256(source) != expected:
-            skipped.append({**entry, 'reason': 'post-copy checksum mismatch'})
+        staging = _unique_path(source.with_name(source.name + '.restore-staging'))
+        try:
+            shutil.copy2(backup, staging)
+        except Exception as exc:
+            if staging.exists():
+                staging.unlink()
+            failed.append({**entry, 'reason': 'copy failed', 'error': str(exc), 'source_preserved': True})
             continue
+        staged_sha = _sha256(staging)
+        if expected and staged_sha != expected:
+            evidence = _unique_path(source.with_name(source.name + '.restore-mismatch.bin'))
+            os.replace(staging, evidence)
+            failed.append({
+                **entry,
+                'reason': 'post-copy checksum mismatch',
+                'expected_sha256': expected,
+                'actual_sha256': staged_sha,
+                'source_preserved': True,
+                'evidence_copy': str(evidence),
+                'backup_preserved': str(backup),
+            })
+            continue
+        os.replace(staging, source)
         restored.append(str(source))
-    return {'restored': restored, 'skipped': skipped}
+    return {'ok': not failed, 'restored': restored, 'skipped': skipped, 'failed': failed}
 
 
 def hermes_db_maintenance(execute: bool = False, yes: bool = False, min_free_gb: float = 15.0) -> dict:
