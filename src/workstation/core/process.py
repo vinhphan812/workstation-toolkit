@@ -1,5 +1,7 @@
 """Process inspection — cross-platform via psutil."""
-import psutil, os, time
+import os, re, time
+
+import psutil
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -44,31 +46,22 @@ def list_processes(threshold_mb: int = 100) -> List[ProcessInfo]:
     return results
 
 def is_process_orphaned(proc: ProcessInfo) -> tuple[bool, str]:
-    """Check if process is orphaned: parent dead, or cmdline refs deleted path."""
-    # Command lines retain evidence even after their launching parent has
-    # exited. Normalise separators for Windows before checking them.
-    normalized_cmdline = proc.cmdline.replace("/", "\\")
-    if ".worktrees" in normalized_cmdline and "t_" in normalized_cmdline:
-        return True, "cmdline references orphaned worktree path"
+    """Report only explicit stale-path evidence, not a missing parent alone.
 
-    import re
+    Parentless processes are normal on Windows and Unix. Parent and cwd
+    access failures are treated as unknown; an empty cwd is not missing-path
+    evidence. A deleted cwd or explicit stale worktree cmdline remains useful
+    advisory evidence.
+    """
+    normalized = proc.cmdline.replace("/", "\\")
+    if ".worktrees" in normalized and "t_" in normalized:
+        return True, "cmdline references orphaned worktree path"
     for pattern in (r"worktree.*deleted", r"node_modules.*missing"):
-        if re.search(pattern, normalized_cmdline, flags=re.IGNORECASE):
+        if re.search(pattern, normalized, flags=re.IGNORECASE):
             return True, "cmdline references orphaned path"
 
-    # A missing parent is additional evidence only after checking the
-    # command line, which yields the more specific reason.
-    try:
-        psutil.Process(proc.parent_pid).name()
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return True, f"parent PID={proc.parent_pid} not found"
-    except Exception:
-        return True, f"parent PID={proc.parent_pid} unreachable"
-
-    # Check cwd exists
     if proc.cwd and not os.path.exists(proc.cwd):
         return True, f"cwd does not exist: {proc.cwd}"
-
     return False, ""
 
 def kill_process(pid: int) -> bool:
