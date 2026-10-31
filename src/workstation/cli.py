@@ -45,6 +45,18 @@ def cmd_process(args):
     _emit({"processes": processes}, args, "process")
 
 
+def cmd_guard(args):
+    from workstation.modules.guard_audit import scan_processes, kill_pid
+    if args.guard_action == "scan":
+        report = scan_processes(no_network=args.no_network)
+    else:
+        report = kill_pid(args.pid, execute=args.execute)
+    print(json.dumps(report, indent=2))
+    _emit(report, args, f"guard_{args.guard_action}")
+    if report.get("action") == "failed":
+        raise SystemExit(1)
+
+
 def cmd_git_identity(args):
     from workstation.core.git import check_all_identities, print_identity_report, fix_bad_identities
     repos = load_repos()
@@ -261,6 +273,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("diagnose", help="Full system diagnostic").set_defaults(func=cmd_diagnose)
     sub.add_parser("storage", help="Mounted drive capacity audit").set_defaults(func=cmd_storage)
     p = sub.add_parser("process", help="Heavy process audit"); p.add_argument("-t", "--threshold", type=int, default=500); p.set_defaults(func=cmd_process)
+    guard_parser = sub.add_parser("guard", help="Read-only process risk triage; explicit PID termination only")
+    guard_sub = guard_parser.add_subparsers(dest="guard_action", required=True)
+    scan = guard_sub.add_parser("scan", help="Read-only process scan")
+    scan.add_argument("--no-network", action="store_true", help="Skip all network inspection")
+    scan.set_defaults(func=cmd_guard)
+    kill = guard_sub.add_parser("kill", help="Preview or request termination of exactly one PID")
+    kill.add_argument("pid", type=int)
+    kill.add_argument("--execute", action="store_true", help="Actually request termination; otherwise dry-run")
+    kill.set_defaults(func=cmd_guard, no_network=True)
     p = sub.add_parser("git-identity", help="Git identity audit"); p.add_argument("--fix", action="store_true"); p.set_defaults(func=cmd_git_identity)
     p = sub.add_parser("git-worktrees", help="Git worktree audit"); p.add_argument("--execute", action="store_true"); p.add_argument("-y", "--yes", action="store_true"); p.set_defaults(func=cmd_git_worktrees)
     p = sub.add_parser("docker", help="Docker audit and explicit cleanup"); p.add_argument("--prune", action="store_true"); p.add_argument("--images", action="store_true"); p.add_argument("--volumes", action="store_true"); p.add_argument("-y", "--yes", action="store_true"); p.set_defaults(func=cmd_docker)
