@@ -4,12 +4,83 @@ import pytest
 import workstation.modules.maintenance as maintenance
 from workstation.core.backup import _sha256
 
+def _write_manifest(path, entries):
+    path.write_text(json.dumps({'created_at': 'now', 'label': 'test', 'files': entries}))
+    return path
+
+
 def test_restore_skips_checksum_mismatch(tmp_path):
     target = tmp_path / 'target.txt'
     backup = tmp_path / 'backup.txt'
     backup.write_text('changed')
-    manifest = tmp_path / 'manifest.json'
-    manifest.write_text(json.dumps({'files': [{'source': str(target), 'backup': str(backup), 'status':'backed_up', 'sha256': 'wrong'}]}))
+    manifest = _write_manifest(tmp_path / 'manifest.json', [{'source': str(target), 'backup': str(backup), 'status':'backed_up', 'sha256': '0' * 64}])
     result = maintenance.restore_backup(str(manifest), execute=True, yes=True)
     assert not result['restored']
     assert result['skipped'][0]['reason'] == 'checksum mismatch'
+
+
+def test_restore_requires_explicit_execution_before_manifest_read(tmp_path):
+    with pytest.raises(RuntimeError):
+        maintenance.restore_backup(str(tmp_path / 'absent.json'))
+
+
+def test_restore_rejects_invalid_schema_without_mutating_target(tmp_path):
+    target = tmp_path / 'target.txt'
+    target.write_text('original')
+    manifest = _write_manifest(tmp_path / 'manifest.json', ['not an entry'])
+    with pytest.raises(ValueError, match='expected object'):
+        maintenance.restore_backup(str(manifest), execute=True, yes=True)
+    assert target.read_text() == 'original'
+
+
+def test_restore_rejects_traversal_backup_path(tmp_path):
+    outside = tmp_path / 'outside.txt'
+    outside.write_text('attacker data')
+    target = tmp_path / 'target.txt'
+    target.write_text('original')
+    root = tmp_path / 'backups'
+    root.mkdir()
+    manifest = _write_manifest(root / 'manifest.json', [{'source': str(target), 'backup': '../outside.txt', 'status': 'backed_up'}])
+    with pytest.raises(ValueError, match='escapes manifest directory'):
+        maintenance.restore_backup(str(manifest), execute=True, yes=True)
+    assert target.read_text() == 'original'
+
+
+def test_restore_rejects_backup_symlink_escape(tmp_path):
+    outside = tmp_path / 'outside.txt'
+    outside.write_text('outside content')
+    target = tmp_path / 'target.txt'
+    target.write_text('original')
+    root = tmp_path / 'backups'
+    root.mkdir()
+    link = root / 'linked.txt'
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip('symlinks are unavailable')
+    manifest = _write_manifest(root / 'manifest.json', [{'source': str(target), 'backup': str(link), 'status': 'backed_up'}])
+    with pytest.raises(ValueError, match='escapes manifest directory'):
+        maintenance.restore_backup(str(manifest), execute=True, yes=True)
+    assert target.read_text() == 'original'
+
+
+def test_restore_rejects_non_absolute_destination(tmp_path):
+    root = tmp_path / 'backups'
+    root.mkdir()
+    backup = root / 'payload'
+    backup.write_text('payload')
+    manifest = _write_manifest(root / 'manifest.json', [{'source': '../victim', 'backup': str(backup), 'status': 'backed_up'}])
+    with pytest.raises(ValueError, match='source must be absolute'):
+        maintenance.restore_backup(str(manifest), execute=True, yes=True)
+
+
+def test_restore_accepts_backup_files_manifest(tmp_path, monkeypatch):
+    import workstation.core.backup as backup_module
+    monkeypatch.setattr(backup_module, 'BACKUPS_DIR', tmp_path / 'backups')
+    source = tmp_path / 'source.db'
+    source.write_text('backup data')
+    created = backup_module.backup_files('compat', [str(source)])
+    source.write_text('changed')
+    report = maintenance.restore_backup(created['manifest'], execute=True, yes=True)
+    assert report['restored'] == [str(source)]
+    assert source.read_text() == 'backup data'
