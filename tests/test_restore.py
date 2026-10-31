@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 import pytest
@@ -11,12 +12,22 @@ def _write_manifest(path, entries):
 
 def test_restore_skips_checksum_mismatch(tmp_path):
     target = tmp_path / 'target.txt'
+    target.write_text('original destination')
     backup = tmp_path / 'backup.txt'
     backup.write_text('changed')
     manifest = _write_manifest(tmp_path / 'manifest.json', [{'source': str(target), 'backup': str(backup), 'status':'backed_up', 'sha256': '0' * 64}])
     result = maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert not result['restored']
-    assert result['skipped'][0]['reason'] == 'checksum mismatch'
+    assert result['ok'] is False
+    mismatch = result['failed'][0]
+    assert mismatch['reason'] == 'checksum mismatch'
+    assert mismatch['expected_sha256'] == '0' * 64
+    assert mismatch['actual_sha256'] == hashlib.sha256(b'changed').hexdigest()
+    assert mismatch['evidence_path'] == str(backup)
+    assert mismatch['source_preserved'] is True
+    assert mismatch['backup_preserved'] is True
+    assert target.read_text() == 'original destination'
+    assert backup.read_bytes() == b'changed'
 
 
 @pytest.mark.parametrize('sha', [None, '0' * 63, 'z' * 64])
@@ -33,6 +44,18 @@ def test_restore_rejects_missing_null_or_malformed_hash_before_mutation(tmp_path
         maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert target.read_text() == 'original'
     assert backup.read_text() == 'backup'
+
+
+def test_cmd_restore_exits_nonzero_when_restore_report_fails(monkeypatch, capsys):
+    import argparse
+    import workstation.cli as cli
+    import workstation.modules.maintenance as maintenance_module
+    monkeypatch.setattr(maintenance_module, 'restore_backup', lambda manifest_path, **kwargs: {'ok': False, 'restored': [], 'skipped': [], 'failed': [{'reason': 'checksum mismatch'}]})
+    args = argparse.Namespace(manifest='manifest.json', execute=True, yes=True, allowed_root=['D:/allowed'], json=False, save_report=None)
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_restore(args)
+    assert exc.value.code == 1
+    assert 'checksum mismatch' in capsys.readouterr().out
 
 
 def test_restore_preserves_corrupt_stage_evidence_and_destination(tmp_path, monkeypatch):
@@ -56,9 +79,14 @@ def test_restore_preserves_corrupt_stage_evidence_and_destination(tmp_path, monk
     monkeypatch.setattr(builtins, 'open', corrupt_stage_on_reread)
     report = maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert not report['restored']
-    mismatch = report['skipped'][0]
+    mismatch = report['failed'][0]
+    assert report['ok'] is False
     assert mismatch['reason'] == 'post-copy checksum mismatch'
+    assert mismatch['expected_sha256'] == _sha256(backup)
     evidence = Path(mismatch['evidence_path'])
+    assert mismatch['actual_sha256'] == _sha256(evidence)
+    assert mismatch['source_preserved'] is True
+    assert mismatch['backup_preserved'] is True
     assert evidence.is_file() and evidence.read_bytes() == b'corrupted staged bytes'
     assert target.read_text() == 'original'
     assert backup.read_text() == 'trusted backup'

@@ -111,6 +111,8 @@ python -m workstation docker --prune --images --volumes --yes
 python -m workstation hermes
 
 # Restore a manifest only into explicitly authorized destination roots
+# Manifest backup directories must be trusted and not concurrently modified.
+# Source paths must be absolute native paths for the operating system running the restore.
 python -m workstation restore D:/backups/manifest.json --execute --yes --allowed-root D:/projects
 
 # Kanban is read-only: board health and archive candidates only

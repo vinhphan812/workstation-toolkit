@@ -35,7 +35,7 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
     manifest = json.loads(manifest_file.read_text(encoding='utf-8'))
     if not isinstance(manifest, dict) or not isinstance(manifest.get('files'), list):
         raise ValueError("Invalid backup manifest: 'files' must be a list")
-    restored, skipped = [], []
+    restored, skipped, failed = [], [], []
     backup_root = manifest_file.parent.resolve(strict=True)
     validated = []
     for index, entry in enumerate(manifest['files']):
@@ -102,7 +102,7 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
                     source_hash.update(chunk)
                 actual = source_hash.hexdigest()
                 if actual.lower() != expected.lower():
-                    skipped.append({**entry, 'reason': 'checksum mismatch', 'actual_sha256': actual})
+                    failed.append({**entry, 'reason': 'checksum mismatch', 'expected_sha256': expected, 'actual_sha256': actual, 'evidence_path': str(backup), 'source_preserved': True, 'backup_preserved': True})
                     continue
                 stream.seek(0)
                 source.parent.mkdir(parents=True, exist_ok=True)
@@ -115,7 +115,8 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
                     out.flush()
                     os.fsync(out.fileno())
                 if copy_hash.hexdigest().lower() != expected.lower():
-                    skipped.append({**entry, 'reason': 'source changed during staging'})
+                    failed.append({**entry, 'reason': 'source changed during staging', 'expected_sha256': expected, 'actual_sha256': copy_hash.hexdigest(), 'evidence_path': temp_name, 'source_preserved': True, 'backup_preserved': True})
+                    temp_name = None
                     continue
         finally:
             os.close(fd)
@@ -125,7 +126,7 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
                 for chunk in iter(lambda: staged.read(1024 * 1024), b''):
                     staged_hash.update(chunk)
             if staged_hash.hexdigest().lower() != expected.lower():
-                skipped.append({**entry, 'reason': 'post-copy checksum mismatch', 'evidence_path': temp_name})
+                failed.append({**entry, 'reason': 'post-copy checksum mismatch', 'expected_sha256': expected, 'actual_sha256': staged_hash.hexdigest(), 'evidence_path': temp_name, 'source_preserved': True, 'backup_preserved': True})
                 temp_name = None
                 continue
             os.replace(temp_name, source)
@@ -137,7 +138,7 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
                     os.unlink(temp_name)
                 except FileNotFoundError:
                     pass
-    return {'restored': restored, 'skipped': skipped}
+    return {'ok': not failed, 'restored': restored, 'skipped': skipped, 'failed': failed}
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
