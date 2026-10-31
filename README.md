@@ -110,6 +110,9 @@ python -m workstation docker --prune --images --volumes --yes
 # Hermes profile/state database health
 python -m workstation hermes
 
+# Restore a manifest only into explicitly authorized destination roots
+python -m workstation restore D:/backups/manifest.json --execute --yes --allowed-root D:/projects
+
 # Kanban is read-only: board health and archive candidates only
 python -m workstation kanban
 python -m workstation kanban --archive-plan 30

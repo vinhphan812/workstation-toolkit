@@ -66,7 +66,7 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
         if not _is_relative_to(backup, backup_root):
             raise ValueError(f'Invalid backup manifest entry {index}: backup escapes manifest directory')
         expected = entry.get('sha256')
-        if expected is not None and (not isinstance(expected, str) or len(expected) != 64 or any(c not in '0123456789abcdefABCDEF' for c in expected)):
+        if not isinstance(expected, str) or len(expected) != 64 or any(c not in '0123456789abcdefABCDEF' for c in expected):
             raise ValueError(f"Invalid backup manifest entry {index}: invalid sha256")
         validated.append((entry, source, (backup, expected)))
 
@@ -78,45 +78,65 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
         if not backup.is_file():
             skipped.append({**entry, 'reason': 'backup missing'})
             continue
-        # On POSIX O_NOFOLLOW protects the final component. The descriptor is
-        # opened once, then both digest validation and staging use those exact
-        # bytes, closing the path-reopen TOCTOU. Parent-directory swaps in a
-        # concurrently writable backup tree remain outside this threat model;
-        # backup directories must not be concurrently modified during restore.
-        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+        # On POSIX O_NOFOLLOW protects the final component. Windows does not
+        # expose O_NOFOLLOW here; there we rely on regular-file validation and
+        # the requirement that the backup tree is not concurrently modified.
+        # Parent-directory swaps in a concurrently writable tree remain outside
+        # this threat model.
+        nofollow = getattr(os, 'O_NOFOLLOW', 0)
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | nofollow
         try:
             fd = os.open(backup, flags)
         except OSError as exc:
             raise ValueError(f'Unable to safely open backup payload: {exc}') from exc
+        temp_name = None
         try:
             with os.fdopen(fd, 'rb', closefd=False) as stream:
                 info = os.fstat(stream.fileno())
                 if not stat.S_ISREG(info.st_mode):
                     raise ValueError('Backup payload is not a regular file')
-                data = stream.read()
+                # Validate the complete source before creating any destination
+                # staging file, then rewind this same descriptor for the copy.
+                source_hash = hashlib.sha256()
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    source_hash.update(chunk)
+                actual = source_hash.hexdigest()
+                if actual.lower() != expected.lower():
+                    skipped.append({**entry, 'reason': 'checksum mismatch', 'actual_sha256': actual})
+                    continue
+                stream.seek(0)
+                source.parent.mkdir(parents=True, exist_ok=True)
+                stage_fd, temp_name = tempfile.mkstemp(prefix=f'.{source.name}.restore-', dir=source.parent)
+                copy_hash = hashlib.sha256()
+                with os.fdopen(stage_fd, 'wb') as out:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                        copy_hash.update(chunk)
+                        out.write(chunk)
+                    out.flush()
+                    os.fsync(out.fileno())
+                if copy_hash.hexdigest().lower() != expected.lower():
+                    skipped.append({**entry, 'reason': 'source changed during staging'})
+                    continue
         finally:
             os.close(fd)
-        actual = hashlib.sha256(data).hexdigest()
-        if expected and actual.lower() != expected.lower():
-            skipped.append({**entry, 'reason': 'checksum mismatch', 'actual_sha256': actual})
-            continue
-        source.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(prefix=f'.{source.name}.restore-', dir=source.parent)
         try:
-            with os.fdopen(fd, 'wb') as out:
-                out.write(data)
-                out.flush()
-                os.fsync(out.fileno())
-            if expected and hashlib.sha256(Path(temp_name).read_bytes()).hexdigest().lower() != expected.lower():
-                skipped.append({**entry, 'reason': 'post-copy checksum mismatch'})
+            staged_hash = hashlib.sha256()
+            with open(temp_name, 'rb') as staged:
+                for chunk in iter(lambda: staged.read(1024 * 1024), b''):
+                    staged_hash.update(chunk)
+            if staged_hash.hexdigest().lower() != expected.lower():
+                skipped.append({**entry, 'reason': 'post-copy checksum mismatch', 'evidence_path': temp_name})
+                temp_name = None
                 continue
             os.replace(temp_name, source)
+            temp_name = None
             restored.append(str(source))
         finally:
-            try:
-                os.unlink(temp_name)
-            except FileNotFoundError:
-                pass
+            if temp_name is not None:
+                try:
+                    os.unlink(temp_name)
+                except FileNotFoundError:
+                    pass
     return {'restored': restored, 'skipped': skipped}
 
 

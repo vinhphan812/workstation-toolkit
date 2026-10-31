@@ -19,6 +19,51 @@ def test_restore_skips_checksum_mismatch(tmp_path):
     assert result['skipped'][0]['reason'] == 'checksum mismatch'
 
 
+@pytest.mark.parametrize('sha', [None, '0' * 63, 'z' * 64])
+def test_restore_rejects_missing_null_or_malformed_hash_before_mutation(tmp_path, sha):
+    target = tmp_path / 'target.txt'
+    target.write_text('original')
+    backup = tmp_path / 'backup.txt'
+    backup.write_text('backup')
+    entry = {'source': str(target), 'backup': str(backup), 'status': 'backed_up'}
+    if sha is not None:
+        entry['sha256'] = sha
+    manifest = _write_manifest(tmp_path / 'manifest.json', [entry])
+    with pytest.raises(ValueError, match='invalid sha256'):
+        maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
+    assert target.read_text() == 'original'
+    assert backup.read_text() == 'backup'
+
+
+def test_restore_preserves_corrupt_stage_evidence_and_destination(tmp_path, monkeypatch):
+    import builtins
+    target = tmp_path / 'target.txt'
+    target.write_text('original')
+    backup = tmp_path / 'backup.txt'
+    backup.write_text('trusted backup')
+    manifest = _write_manifest(tmp_path / 'manifest.json', [{
+        'source': str(target), 'backup': str(backup), 'status': 'backed_up',
+        'sha256': _sha256(backup),
+    }])
+    real_open = builtins.open
+    corrupted = False
+    def corrupt_stage_on_reread(file, mode='r', *args, **kwargs):
+        nonlocal corrupted
+        if not corrupted and isinstance(file, (str, Path)) and '.restore-' in str(file) and mode == 'rb':
+            corrupted = True
+            Path(file).write_bytes(b'corrupted staged bytes')
+        return real_open(file, mode, *args, **kwargs)
+    monkeypatch.setattr(builtins, 'open', corrupt_stage_on_reread)
+    report = maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
+    assert not report['restored']
+    mismatch = report['skipped'][0]
+    assert mismatch['reason'] == 'post-copy checksum mismatch'
+    evidence = Path(mismatch['evidence_path'])
+    assert evidence.is_file() and evidence.read_bytes() == b'corrupted staged bytes'
+    assert target.read_text() == 'original'
+    assert backup.read_text() == 'trusted backup'
+
+
 def test_restore_requires_allowed_root_without_mutation(tmp_path):
     target = tmp_path / 'new' / 'target.txt'
     root = tmp_path / 'backup'
