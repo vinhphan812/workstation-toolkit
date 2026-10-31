@@ -51,8 +51,12 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False)
             skipped.append({**entry, 'reason': 'backup missing'})
             continue
         expected = entry.get('sha256')
+        if not isinstance(expected, str) or len(expected) != 64 or any(c not in '0123456789abcdefABCDEF' for c in expected):
+            skipped.append({**entry, 'reason': 'invalid or missing sha256'})
+            continue
+        expected = expected.lower()
         actual = _sha256(backup)
-        if expected and actual != expected:
+        if actual != expected:
             skipped.append({**entry, 'reason': 'checksum mismatch', 'actual_sha256': actual})
             continue
         source.parent.mkdir(parents=True, exist_ok=True)
@@ -65,7 +69,7 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False)
             failed.append({**entry, 'reason': 'copy failed', 'error': str(exc), 'source_preserved': True})
             continue
         staged_sha = _sha256(staging)
-        if expected and staged_sha != expected:
+        if staged_sha != expected:
             evidence = _unique_path(source.with_name(source.name + '.restore-mismatch.bin'))
             os.replace(staging, evidence)
             failed.append({
