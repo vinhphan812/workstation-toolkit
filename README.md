@@ -5,7 +5,7 @@ A **cross-platform workstation operations toolkit** for Windows, Linux, and macO
 ## Safety model
 
 - Read-only commands are the default.
-- Mutating operations require an explicit flag such as `--fix`, `--prune`, `--execute`, or `--kill`.
+- Mutating operations require an explicit flag such as `--fix`, `--prune`, or `--execute`.
 - Git worktree deletion refuses Git-registered worktrees.
 - Git identity remediation only unsets known unsafe local identities, such as `hermes@agent.local`; it never writes a local identity.
 - Large Hermes SQLite databases are not integrity-scanned in the fast health check; the command reports that this work is deferred rather than blocking for minutes.
@@ -61,6 +61,15 @@ python -m workstation forecast
 # Heavy process audit (default: >=500 MB)
 python -m workstation process --threshold 1000
 
+# Guard scan is read-only; --no-network explicitly skips network inspection
+python -m workstation guard scan --no-network
+
+# Preview termination of one explicitly selected PID (dry-run by default)
+python -m workstation guard kill 1234
+
+# Request termination of exactly that PID only with explicit opt-in
+python -m workstation guard kill 1234 --execute
+
 # Repository hygiene
 python -m workstation repos
 python -m workstation repos --stale-branches
@@ -110,6 +119,11 @@ python -m workstation --json --save-report forecast
 ```
 
 ## Cross-platform design
+
+### Process guard limitations
+
+`guard scan` reports point-in-time process evidence and weak name/command-line heuristics; it is not malware detection and can produce false positives or miss threats. Names such as AnyDesk and TeamViewer are not treated as suspicious solely because they are remote-support tools. By default, scanning inspects available network connections; permissions may limit this evidence. `--no-network` skips network inspection entirely. Scanning never terminates processes. `guard kill <PID>` is a dry-run unless `--execute` is supplied, and then requests termination of only that PID. Review evidence and verify the target before opting in.
+
 
 The Python core contains portable operations:
 
