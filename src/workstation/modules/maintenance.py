@@ -19,19 +19,55 @@ def create_backup(label: str = 'workstation') -> dict:
 
 
 def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False) -> dict:
+    """Restore only well-formed entries confined to their manifest backup folder.
+
+    ``source`` is an absolute original path in manifests emitted by
+    :func:`backup_files`; ``backup`` must remain inside the manifest directory.
+    """
     require_execute(execute, yes, 'restore')
-    manifest = json.loads(Path(manifest_path).read_text(encoding='utf-8'))
+    manifest_file = Path(manifest_path).resolve(strict=True)
+    manifest = json.loads(manifest_file.read_text(encoding='utf-8'))
+    if not isinstance(manifest, dict) or not isinstance(manifest.get('files'), list):
+        raise ValueError("Invalid backup manifest: 'files' must be a list")
     restored, skipped = [], []
-    for entry in manifest.get('files', []):
-        if entry.get('status') != 'backed_up':
+    backup_root = manifest_file.parent.resolve(strict=True)
+    for index, entry in enumerate(manifest['files']):
+        if not isinstance(entry, dict):
+            raise ValueError(f'Invalid backup manifest entry {index}: expected object')
+        status = entry.get('status')
+        if not isinstance(status, str):
+            raise ValueError(f"Invalid backup manifest entry {index}: 'status' must be a string")
+        if status != 'backed_up':
+            if status != 'missing':
+                raise ValueError(f"Invalid backup manifest entry {index}: unsupported status {status!r}")
+            source_value = entry.get('source')
+            if not isinstance(source_value, str) or not source_value:
+                raise ValueError(f"Invalid backup manifest entry {index}: invalid source")
             skipped.append(entry)
             continue
-        source, backup = Path(entry['source']), Path(entry['backup'])
+        source_value, backup_value = entry.get('source'), entry.get('backup')
+        if not isinstance(source_value, str) or not source_value or not isinstance(backup_value, str) or not backup_value:
+            raise ValueError(f'Invalid backup manifest entry {index}: source and backup must be non-empty paths')
+        source, backup = Path(source_value), Path(backup_value)
+        if not source.is_absolute():
+            raise ValueError(f"Invalid backup manifest entry {index}: source must be absolute")
+        if not backup.is_absolute():
+            backup = backup_root / backup
+        # Resolve existing symlinks before containment checks. The destination
+        # itself may not exist; resolve(strict=False) still resolves its parents.
+        backup = backup.resolve(strict=True)
+        try:
+            backup.relative_to(backup_root)
+        except ValueError as exc:
+            raise ValueError(f'Invalid backup manifest entry {index}: backup escapes manifest directory') from exc
+        source = source.resolve(strict=False)
+        expected = entry.get('sha256')
+        if expected is not None and (not isinstance(expected, str) or len(expected) != 64 or any(c not in '0123456789abcdefABCDEF' for c in expected)):
+            raise ValueError(f"Invalid backup manifest entry {index}: invalid sha256")
         if not backup.is_file():
             skipped.append({**entry, 'reason': 'backup missing'})
             continue
         from workstation.core.backup import _sha256
-        expected = entry.get('sha256')
         actual = _sha256(backup)
         if expected and actual != expected:
             skipped.append({**entry, 'reason': 'checksum mismatch', 'actual_sha256': actual})
