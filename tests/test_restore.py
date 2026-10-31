@@ -14,9 +14,43 @@ def test_restore_skips_checksum_mismatch(tmp_path):
     backup = tmp_path / 'backup.txt'
     backup.write_text('changed')
     manifest = _write_manifest(tmp_path / 'manifest.json', [{'source': str(target), 'backup': str(backup), 'status':'backed_up', 'sha256': '0' * 64}])
-    result = maintenance.restore_backup(str(manifest), execute=True, yes=True)
+    result = maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert not result['restored']
     assert result['skipped'][0]['reason'] == 'checksum mismatch'
+
+
+def test_restore_requires_allowed_root_without_mutation(tmp_path):
+    target = tmp_path / 'new' / 'target.txt'
+    root = tmp_path / 'backup'
+    root.mkdir()
+    payload = root / 'payload'
+    payload.write_text('payload')
+    manifest = _write_manifest(root / 'manifest.json', [{'source': str(target), 'backup': str(payload), 'status': 'backed_up'}])
+    with pytest.raises(ValueError, match='requires at least one'):
+        maintenance.restore_backup(str(manifest), execute=True, yes=True)
+    assert not target.parent.exists()
+
+
+def test_restore_rejects_disallowed_destination_before_mutation(tmp_path):
+    allowed = tmp_path / 'allowed'
+    allowed.mkdir()
+    outside = tmp_path / 'outside' / 'victim.txt'
+    backup_root = tmp_path / 'backup'
+    backup_root.mkdir()
+    payload = backup_root / 'payload'
+    payload.write_text('attacker payload')
+    manifest = _write_manifest(backup_root / 'manifest.json', [{'source': str(outside), 'backup': str(payload), 'status': 'backed_up'}])
+    with pytest.raises(ValueError, match='outside allowed roots'):
+        maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(allowed)])
+    assert not outside.parent.exists()
+
+
+def test_restore_validates_missing_entry_source_policy(tmp_path):
+    root = tmp_path / 'allowed'
+    root.mkdir()
+    manifest = _write_manifest(tmp_path / 'manifest.json', [{'source': 'relative.txt', 'status': 'missing'}])
+    with pytest.raises(ValueError, match='source must be absolute'):
+        maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(root)])
 
 
 def test_restore_requires_explicit_execution_before_manifest_read(tmp_path):
@@ -29,7 +63,7 @@ def test_restore_rejects_invalid_schema_without_mutating_target(tmp_path):
     target.write_text('original')
     manifest = _write_manifest(tmp_path / 'manifest.json', ['not an entry'])
     with pytest.raises(ValueError, match='expected object'):
-        maintenance.restore_backup(str(manifest), execute=True, yes=True)
+        maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert target.read_text() == 'original'
 
 
@@ -42,7 +76,7 @@ def test_restore_rejects_traversal_backup_path(tmp_path):
     root.mkdir()
     manifest = _write_manifest(root / 'manifest.json', [{'source': str(target), 'backup': '../outside.txt', 'status': 'backed_up'}])
     with pytest.raises(ValueError, match='escapes manifest directory'):
-        maintenance.restore_backup(str(manifest), execute=True, yes=True)
+        maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert target.read_text() == 'original'
 
 
@@ -60,7 +94,7 @@ def test_restore_rejects_backup_symlink_escape(tmp_path):
         pytest.skip('symlinks are unavailable')
     manifest = _write_manifest(root / 'manifest.json', [{'source': str(target), 'backup': str(link), 'status': 'backed_up'}])
     with pytest.raises(ValueError, match='escapes manifest directory'):
-        maintenance.restore_backup(str(manifest), execute=True, yes=True)
+        maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert target.read_text() == 'original'
 
 
@@ -71,7 +105,7 @@ def test_restore_rejects_non_absolute_destination(tmp_path):
     backup.write_text('payload')
     manifest = _write_manifest(root / 'manifest.json', [{'source': '../victim', 'backup': str(backup), 'status': 'backed_up'}])
     with pytest.raises(ValueError, match='source must be absolute'):
-        maintenance.restore_backup(str(manifest), execute=True, yes=True)
+        maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
 
 
 def test_restore_accepts_backup_files_manifest(tmp_path, monkeypatch):
@@ -81,6 +115,6 @@ def test_restore_accepts_backup_files_manifest(tmp_path, monkeypatch):
     source.write_text('backup data')
     created = backup_module.backup_files('compat', [str(source)])
     source.write_text('changed')
-    report = maintenance.restore_backup(created['manifest'], execute=True, yes=True)
+    report = maintenance.restore_backup(created['manifest'], execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert report['restored'] == [str(source)]
     assert source.read_text() == 'backup data'
