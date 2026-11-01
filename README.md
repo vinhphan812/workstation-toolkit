@@ -9,6 +9,7 @@ A **cross-platform workstation operations toolkit** for Windows, Linux, and macO
 - Git worktree deletion refuses Git-registered worktrees.
 - Git identity remediation only unsets known unsafe local identities, such as `hermes@agent.local`; it never writes a local identity.
 - Large Hermes SQLite databases are not integrity-scanned in the fast health check; the command reports that this work is deferred rather than blocking for minutes.
+- Configured project commands are **executable code**. `--execute` runs the configured command with the current user's privileges, exactly as if it had been typed into a terminal. Only the person running the toolkit can approve that.
 
 ## Requirements
 
@@ -173,6 +174,64 @@ Copy the `*.example` files on a new machine, adjust the paths, and run the same 
 | `HERMES_KANBAN_HOME` | Exact Kanban boards directory |
 
 Reports are written under `reports/`; local config, reports, and backups remain gitignored.
+
+### Project commands are executable code
+
+`config/projects.json` holds the commands the toolkit runs on your behalf. Those
+entries are **executable code**, not data. `python -m workstation project <name>
+<action> --execute` runs the configured command with the privileges of the
+current user, exactly as if you had typed it into a terminal yourself. Review
+the dry-run output before using `--execute`.
+
+Commands are configured in one of two explicit forms:
+
+```json
+{
+  "projects": [
+    {
+      "name": "example-project",
+      "path": "/absolute/path/to/project",
+      "commands": {
+        "test": {"argv": ["python", "-m", "pytest"]},
+        "lint": {"argv": ["python", "-m", "ruff", "check", "."]}
+      }
+    }
+  ]
+}
+```
+
+**`argv` (recommended)** — the command is an argument list and is executed
+*without* a shell. Every element is passed literally to the operating system,
+so a value such as `"release && rm -rf build"` is data, never syntax.
+
+**`shell`** — the command is a shell string and is interpreted by the platform
+shell. This mode requires an explicit trusted-shell opt-in that is deliberately
+*not* part of the configuration file, so that somebody able to edit the
+configuration cannot grant themselves the right to run arbitrary shell code:
+
+```bash
+python -m workstation project example-project lint --execute --allow-shell
+# or, for automation:
+WORKSTATION_ALLOW_SHELL=1 python -m workstation project example-project lint --execute
+```
+
+Without that opt-in a shell-mode command is refused and nothing is executed.
+The dry run always reports which mode a command uses (`"mode": "argv"` or
+`"mode": "shell"`), so the mode is visible before anything runs.
+
+**Migration path for existing string commands.** A legacy plain string is
+accepted and classified automatically:
+
+- a string with no shell syntax (for example `"python -m pytest"`) is split
+  into an argument list and executed without a shell — the same observable
+  result as before, but with no shell involved;
+- a string that uses shell syntax (pipes, redirects, `&&`, globs, variable
+  expansion, and so on) is treated as a shell command and needs the
+  `--allow-shell` opt-in. Convert it to `{"argv": [...]}` to avoid the shell.
+
+Command, environment and timeout values are validated before anything runs.
+Malformed configuration is reported as an error rather than executed.
+
 ## Development
 
 ```bash
