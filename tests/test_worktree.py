@@ -30,3 +30,27 @@ def test_parses_detached_registered_worktree(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "_run_git", lambda *_: (porcelain, 0))
     parsed = get_git_worktrees(root)
     assert os.path.normcase(os.path.normpath(registered)) in parsed
+
+
+
+def test_audit_is_read_only_for_empty_and_nonempty_orphans(tmp_path, monkeypatch):
+    import workstation.core.worktree as module
+
+    repo = tmp_path / "repo"
+    orphan_root = repo / ".worktrees"
+    empty = orphan_root / "empty"
+    nonempty = orphan_root / "nonempty"
+    empty.mkdir(parents=True)
+    nonempty.mkdir()
+    payload = nonempty / "payload"
+    payload.write_text("unchanged")
+    monkeypatch.setattr(module, "get_git_worktrees", lambda _: {})
+
+    results = module.audit_repo_worktrees(str(repo))
+    by_name = {os.path.basename(item.path): item for item in results}
+
+    assert empty.is_dir() and list(empty.iterdir()) == []
+    assert payload.read_text() == "unchanged"
+    for name in ("empty", "nonempty"):
+        assert by_name[name].is_orphaned
+        assert not by_name[name].is_locked

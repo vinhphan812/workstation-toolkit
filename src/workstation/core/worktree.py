@@ -74,14 +74,10 @@ def audit_repo_worktrees(repo: str) -> List[WorktreeInfo]:
         is_known = normalized_path in known
         is_orphaned = not is_known
 
-        # Try a simple delete to check lock
+        # Lock state cannot be inferred from a directory probe: rmdir is
+        # destructive for empty paths and fails for every nonempty path.
+        # Keep this advisory field false unless reliable lock evidence exists.
         is_locked = False
-        if is_orphaned:
-            try:
-                os.rmdir(path)  # Only works on empty dirs
-                is_locked = False
-            except OSError:
-                is_locked = True
 
         results.append(WorktreeInfo(
             path=path,
