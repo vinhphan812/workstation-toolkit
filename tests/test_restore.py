@@ -84,14 +84,11 @@ def test_restore_preserves_corrupt_stage_evidence_and_destination(tmp_path, monk
     else:
         import builtins
         real_open = builtins.open
-        corrupted = False
-        def corrupt_stage_on_reread(file, mode='r', *args, **kwargs):
-            nonlocal corrupted
-            if not corrupted and isinstance(file, (str, Path)) and '.restore-' in str(file) and mode == 'rb':
-                corrupted = True
-                Path(file).write_bytes(b'corrupted staged bytes')
-            return real_open(file, mode, *args, **kwargs)
-        monkeypatch.setattr(builtins, 'open', corrupt_stage_on_reread)
+        real_hash_file = maintenance._hash_file
+        def corrupt_before_hash(path):
+            Path(path).write_bytes(b'corrupted staged bytes')
+            return real_hash_file(path)
+        monkeypatch.setattr(maintenance, '_hash_file', corrupt_before_hash)
     report = maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert not report['restored']
     mismatch = report['failed'][0]
