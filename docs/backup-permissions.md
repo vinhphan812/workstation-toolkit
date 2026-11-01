@@ -44,6 +44,13 @@ is readable by every other user on a permissive umask. The ancestors that a
 backup creates are therefore created one at a time with the owner-only mode.
 An ancestor that already existed is never modified, and it is never widened.
 
+**A read-only artifact can still be rewritten.** The manifest is written
+owner-only and then rewritten with its summary. A file the owner may read
+but not write cannot be replaced in place, so the owner's write bit is added
+for the duration of that write and the original mode is restored afterwards,
+including when the write itself fails. The artifact stays owner-only
+throughout, and a stricter pre-existing mode is preserved.
+
 ## What the caller sees
 
 `backup_files()` returns a `permissions` section that names the weakest
