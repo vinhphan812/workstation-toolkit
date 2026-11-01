@@ -68,27 +68,25 @@ def test_restore_preserves_corrupt_stage_evidence_and_destination(tmp_path, monk
         'source': str(target), 'backup': str(backup), 'status': 'backed_up',
         'sha256': _sha256(backup),
     }])
-    real_hash_staged = getattr(maintenance, '_hash_staged_file', None)
-    if real_hash_staged is None:
-        real_hash_staged = lambda name, parent_fd: _sha256(Path(name))
-    def corrupt_before_hash(name, parent_fd):
-        if parent_fd is None:
-            Path(name).write_bytes(b'corrupted staged bytes')
-        else:
-            fd = os.open(name, os.O_WRONLY | os.O_TRUNC, dir_fd=parent_fd)
-            with os.fdopen(fd, 'wb') as staged:
-                staged.write(b'corrupted staged bytes')
-        return real_hash_staged(name, parent_fd)
     if hasattr(maintenance, '_hash_staged_file'):
+        real_hash_staged = maintenance._hash_staged_file
+        def corrupt_before_hash(name, parent_fd):
+            if parent_fd is None:
+                Path(name).write_bytes(b'corrupted staged bytes')
+            else:
+                fd = os.open(name, os.O_WRONLY | os.O_TRUNC, dir_fd=parent_fd)
+                with os.fdopen(fd, 'wb') as staged:
+                    staged.write(b'corrupted staged bytes')
+            return real_hash_staged(name, parent_fd)
         monkeypatch.setattr(maintenance, '_hash_staged_file', corrupt_before_hash)
     else:
         import builtins
         real_open = builtins.open
-        real_hash_file = maintenance._hash_file
+        original_file_hash = maintenance.file_hash
         def corrupt_before_hash(path):
             Path(path).write_bytes(b'corrupted staged bytes')
-            return real_hash_file(path)
-        monkeypatch.setattr(maintenance, '_hash_file', corrupt_before_hash)
+            return original_file_hash(path)
+        monkeypatch.setattr(maintenance, 'file_hash', corrupt_before_hash)
     report = maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert not report['restored']
     mismatch = report['failed'][0]
