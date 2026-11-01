@@ -176,10 +176,21 @@ def hermes_db_maintenance(execute: bool = False, yes: bool = False, min_free_gb:
     except Exception as exc:
         result.update({'ok': False, 'error': f'SQLite preflight/checkpoint failed: {exc}'})
         return result
+    failures = []
+    if result['quick_check_before'] != 'ok':
+        failures.append({'stage': 'quick_check_before', 'message': f"Expected 'ok', got {result['quick_check_before']!r}"})
+    checkpoint = result['checkpoint']
+    if not isinstance(checkpoint, list) or len(checkpoint) < 3 or checkpoint[0] != 0 or checkpoint[1] != 0:
+        failures.append({'stage': 'checkpoint', 'message': f'Checkpoint busy or incomplete: {checkpoint!r}'})
+    if failures:
+        result.update({'ok': False, 'failures': failures})
+        return result
     try:
         process = subprocess.run(['hermes', 'sessions', 'optimize', '--force'], capture_output=True, text=True, timeout=900)
         result['optimize_exit'] = process.returncode
         result['optimize_output'] = (process.stdout + process.stderr)[-6000:]
+        if process.returncode != 0:
+            failures.append({'stage': 'optimize_exit', 'message': f'Optimizer exited with status {process.returncode}'})
     except Exception as exc:
         result.update({'ok': False, 'error': f'optimize failed: {exc}'})
         return result
@@ -188,8 +199,11 @@ def hermes_db_maintenance(execute: bool = False, yes: bool = False, min_free_gb:
         result['quick_check_after'] = conn.execute('PRAGMA quick_check(1)').fetchone()[0]
         conn.close()
         result['size_after_mb'] = round(db.stat().st_size/(1024**2), 2)
+        if result['quick_check_after'] != 'ok':
+            failures.append({'stage': 'quick_check_after', 'message': f"Expected 'ok', got {result['quick_check_after']!r}"})
     except Exception as exc:
         result.update({'ok': False, 'error': f'post-check failed: {exc}'})
+    result.update({'ok': not failures, 'failures': failures})
     return result
 
 
