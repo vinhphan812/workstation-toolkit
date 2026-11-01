@@ -340,14 +340,33 @@ def rewrite_private_text(path: Path | str, text: str) -> PermissionResult:
     target = Path(path)
     if not target.exists():
         raise FileNotFoundError(target)
-    target.write_text(text, encoding='utf-8')
     if platform_name() == 'windows':
+        target.write_text(text, encoding='utf-8')
         return enforce_file(target)
     try:
         current = stat.S_IMODE(target.stat().st_mode)
     except OSError as exc:
         return PermissionResult(STATUS_FAILED, 'posix', str(target),
                                 detail=f'unable to stat: {exc}')
+    # A file that the owner cannot write cannot be rewritten in place.  The
+    # owner's write bit is added for the duration of the write only and the
+    # original mode is restored afterwards, so the file stays owner-only
+    # throughout and its stricter pre-existing mode is preserved.
+    needs_write = not current & 0o200
+    if needs_write:
+        try:
+            os.chmod(target, current | 0o200)
+        except OSError as exc:
+            return PermissionResult(STATUS_FAILED, 'posix', str(target), mode=current,
+                                    detail=f'unable to make the file writable: {exc}')
+    try:
+        target.write_text(text, encoding='utf-8')
+    finally:
+        if needs_write:
+            try:
+                os.chmod(target, current)
+            except OSError:
+                pass
     if current == FILE_MODE:
         # Re-asserting the mode the file already has changes nothing, but
         # it reports the outcome as enforced instead of merely preserved.

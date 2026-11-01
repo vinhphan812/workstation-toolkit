@@ -7,8 +7,10 @@ Administrators on Windows) keeps access, and the owner keeps access.
 """
 from __future__ import annotations
 
+import errno
 import os
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -94,6 +96,23 @@ def test_rewrite_private_text_keeps_the_file_owner_only(tmp_path):
 
 
 @posix_only
+def test_rewrite_private_text_restores_the_mode_when_the_write_fails(tmp_path, monkeypatch):
+    target = tmp_path / 'manifest.json'
+    permissions.write_private_text(target, '{"a": 1}')
+    target.chmod(0o400)
+
+    def boom(*_args, **_kwargs):
+        raise OSError('the write failed')
+
+    monkeypatch.setattr(Path, 'write_text', boom)
+    with pytest.raises(OSError):
+        permissions.rewrite_private_text(target, '{"a": 2}')
+    # The owner-only mode is restored even though the write failed, and the
+    # file never becomes accessible to any other user.
+    assert stat.S_IMODE(target.stat().st_mode) == 0o400
+
+
+@posix_only
 def test_write_private_text_survives_a_umask_that_removes_the_write_bit(tmp_path, monkeypatch):
     # A creation mode is masked by the umask.  The file must still be
     # writable for its owner afterwards.
@@ -148,7 +167,9 @@ def test_an_unsupported_filesystem_is_reported_as_unsupported(tmp_path, monkeypa
     target.chmod(0o644)
 
     def boom(*_args, **_kwargs):
-        raise OSError(95, 'Operation not supported')
+        # The numeric value of ENOTSUP is platform specific (95 on Linux,
+        # 45 on macOS), so the symbolic constant is used.
+        raise OSError(errno.ENOTSUP, os.strerror(errno.ENOTSUP))
 
     monkeypatch.setattr(permissions.os, 'chmod', boom)
     result = permissions.enforce_file(target)
