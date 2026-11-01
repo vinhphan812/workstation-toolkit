@@ -68,6 +68,71 @@ def test_registered_recheck_refuses_stale_orphan(tmp_path):
     assert target.exists()
 
 
+def test_registration_race_after_quarantine_refuses_and_restores_candidate(tmp_path, monkeypatch):
+    import workstation.core.worktree as module
+
+    repo = tmp_path / "repo"
+    target = repo / ".worktrees" / "candidate"
+    target.mkdir(parents=True)
+    (target / "safe.txt").write_text("keep me")
+    wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
+
+    def register_after_quarantine(_repo, *_args):
+        return "", 0
+
+    real_rename = module.os.rename
+    calls = [0]
+
+    def registered_at_boundary(source, destination, *_args):
+        result = real_rename(source, destination)
+        calls[0] += 1
+        return result
+
+    monkeypatch.setattr(module.os, "rename", registered_at_boundary)
+    monkeypatch.setattr(module, "_run_git", lambda *_: (f"worktree {target}\nbranch refs/heads/live", 0))
+    assert delete_worktree(wt) is False
+    assert (target / "safe.txt").read_text() == "keep me"
+    assert sorted(p.name for p in (repo / ".worktrees").iterdir()) == ["candidate"]
+
+
+def test_candidate_replaced_after_quarantine_is_never_deleted(tmp_path, monkeypatch):
+    import workstation.core.worktree as module
+
+    repo = tmp_path / "repo"
+    target = repo / ".worktrees" / "candidate"
+    target.mkdir(parents=True)
+    (target / "original.txt").write_text("original")
+    wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
+    real_rename = module.os.rename
+    calls = [0]
+
+    def replace_path_after_move(source, destination, *_args):
+        result = real_rename(source, destination)
+        calls[0] += 1
+        if calls[0] == 1:
+            target.mkdir()
+            (target / "outside.txt").write_text("must survive")
+        return result
+
+    monkeypatch.setattr(module.os, "rename", replace_path_after_move)
+    monkeypatch.setattr(module, "_run_git", lambda *_: ("", 0))
+    assert delete_worktree(wt) is False
+    assert (target / "outside.txt").read_text() == "must survive"
+    quarantine = next((repo / ".worktrees").glob(".delete-*"))
+    assert (quarantine / "original.txt").read_text() == "original"
+
+
+def test_force_false_refuses_nonempty_quarantined_directory(tmp_path):
+    repo = tmp_path / "repo"
+    target = repo / ".worktrees" / "candidate"
+    target.mkdir(parents=True)
+    (target / "safe.txt").write_text("keep me")
+    wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
+    with patch("workstation.core.worktree._run_git", return_value=("", 0)):
+        assert delete_worktree(wt, force=False) is False
+    assert (target / "safe.txt").read_text() == "keep me"
+
+
 def test_parses_detached_registered_worktree(tmp_path, monkeypatch):
     from workstation.core.worktree import get_git_worktrees
     import workstation.core.worktree as module

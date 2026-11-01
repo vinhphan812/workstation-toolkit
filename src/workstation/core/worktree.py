@@ -134,18 +134,57 @@ def delete_worktree(wt: WorktreeInfo, force: bool = True) -> bool:
             return False
         if os.path.islink(candidate) or target != candidate or not os.path.isdir(target):
             return False
-        # Re-query once; caller-supplied WorktreeInfo flags are not authority.
+        # Capture the directory entry identity, then atomically move it to an
+        # unpredictable sibling before the final Git registration check. This
+        # prevents a path swap from redirecting recursive deletion elsewhere.
+        before = os.stat(candidate, follow_symlinks=False)
+        quarantine = os.path.join(
+            os.path.dirname(candidate), f".delete-{os.getpid()}-{os.urandom(16).hex()}"
+        )
+        os.rename(candidate, quarantine)
+        moved = os.stat(quarantine, follow_symlinks=False)
+        if (moved.st_dev, moved.st_ino) != (before.st_dev, before.st_ino):
+            if not os.path.lexists(candidate):
+                os.rename(quarantine, candidate)
+            return False
+        if os.path.islink(quarantine) or not os.path.isdir(quarantine):
+            if not os.path.lexists(candidate):
+                os.rename(quarantine, candidate)
+            return False
+        # Re-query after the atomic move. A registration racing before the move
+        # still names candidate; a registration targeting the quarantine path
+        # is also refused. A newly created candidate is never recursively
+        # removed because deletion is confined to the quarantined entry.
         stdout, code = _run_git(repo, "worktree", "list", "--porcelain")
         if code != 0:
+            if not os.path.lexists(candidate):
+                os.rename(quarantine, candidate)
             return False
         registered = {os.path.normcase(os.path.normpath(line[9:].strip()))
                       for line in stdout.splitlines() if line.startswith("worktree ")}
-        normalized = os.path.normcase(os.path.normpath(target))
-        if normalized in registered:
+        quarantined = os.path.normcase(os.path.normpath(quarantine))
+        normalized = os.path.normcase(os.path.normpath(candidate))
+        if normalized in registered or quarantined in registered:
+            if not os.path.lexists(candidate):
+                os.rename(quarantine, candidate)
             return False
-        shutil.rmtree(target)
+        if os.path.lexists(candidate):
+            # A replacement claimed the original name. Preserve both trees.
+            return False
+        if force:
+            shutil.rmtree(quarantine)
+        else:
+            os.rmdir(quarantine)
         return True
     except (OSError, ValueError):
+        # If a safe deletion attempt fails after quarantine, restore the original
+        # pathname only when no replacement has claimed it.
+        if 'quarantine' in locals() and os.path.lexists(quarantine):
+            if not os.path.lexists(candidate):
+                try:
+                    os.rename(quarantine, candidate)
+                except OSError:
+                    pass
         return False
 
 def delete_orphaned(report: dict, confirm: bool = True) -> List[str]:
