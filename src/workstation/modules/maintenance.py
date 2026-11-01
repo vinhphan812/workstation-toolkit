@@ -78,11 +78,8 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
         if not backup.is_file():
             skipped.append({**entry, 'reason': 'backup missing'})
             continue
-        # On POSIX O_NOFOLLOW protects the final component. Windows does not
-        # expose O_NOFOLLOW here; there we rely on regular-file validation and
-        # the requirement that the backup tree is not concurrently modified.
-        # Parent-directory swaps in a concurrently writable tree remain outside
-        # this threat model.
+        # Payload reads use O_NOFOLLOW for the final component. Destination
+        # mutations below are anchored to an opened parent directory on POSIX.
         nofollow = getattr(os, 'O_NOFOLLOW', 0)
         flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | nofollow
         try:
@@ -90,6 +87,7 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
         except OSError as exc:
             raise ValueError(f'Unable to safely open backup payload: {exc}') from exc
         temp_name = None
+        destination_fd = None
         try:
             with os.fdopen(fd, 'rb', closefd=False) as stream:
                 info = os.fstat(stream.fileno())
@@ -105,8 +103,11 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
                     failed.append({**entry, 'reason': 'checksum mismatch', 'expected_sha256': expected, 'actual_sha256': actual, 'evidence_path': str(backup), 'source_preserved': True, 'backup_preserved': True})
                     continue
                 stream.seek(0)
-                source.parent.mkdir(parents=True, exist_ok=True)
-                stage_fd, temp_name = tempfile.mkstemp(prefix=f'.{source.name}.restore-', dir=source.parent)
+                try:
+                    stage_fd, temp_name, destination_fd, leaf_name = _open_destination_parent(source, roots)
+                except (OSError, ValueError) as exc:
+                    failed.append({**entry, 'reason': f'destination parent unavailable: {exc}', 'source_preserved': True, 'backup_preserved': True})
+                    continue
                 copy_hash = hashlib.sha256()
                 with os.fdopen(stage_fd, 'wb') as out:
                     for chunk in iter(lambda: stream.read(1024 * 1024), b''):
@@ -122,23 +123,92 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
             os.close(fd)
         try:
             staged_hash = hashlib.sha256()
-            with open(temp_name, 'rb') as staged:
+            if destination_fd is None:
+                staged_file = open(temp_name, 'rb')
+            else:
+                staged_file = os.fdopen(os.open(temp_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=destination_fd), 'rb')
+            with staged_file as staged:
                 for chunk in iter(lambda: staged.read(1024 * 1024), b''):
                     staged_hash.update(chunk)
             if staged_hash.hexdigest().lower() != expected.lower():
                 failed.append({**entry, 'reason': 'post-copy checksum mismatch', 'expected_sha256': expected, 'actual_sha256': staged_hash.hexdigest(), 'evidence_path': temp_name, 'source_preserved': True, 'backup_preserved': True})
                 temp_name = None
                 continue
-            os.replace(temp_name, source)
+            if destination_fd is not None:
+                os.replace(temp_name, leaf_name, src_dir_fd=destination_fd, dst_dir_fd=destination_fd)
+            else:
+                # Non-POSIX fallback: policy requires destination trees to be
+                # trusted and not concurrently writable during restore.
+                parent = source.parent.resolve(strict=True)
+                if not any(_is_relative_to(parent, root) for root in roots):
+                    failed.append({**entry, 'reason': 'destination parent changed outside allowed roots', 'source_preserved': True, 'backup_preserved': True})
+                    temp_name = None
+                    continue
+                os.replace(temp_name, source)
             temp_name = None
             restored.append(str(source))
         finally:
             if temp_name is not None:
                 try:
-                    os.unlink(temp_name)
-                except FileNotFoundError:
+                    if destination_fd is None:
+                        os.unlink(temp_name)
+                    else:
+                        os.unlink(temp_name, dir_fd=destination_fd)
+                except (FileNotFoundError, OSError):
                     pass
+            if destination_fd is not None:
+                os.close(destination_fd)
     return {'ok': not failed, 'restored': restored, 'skipped': skipped, 'failed': failed}
+
+
+def _open_destination_parent(source: Path, roots: list[Path]):
+    """Create/open the parent without following swapped path components (POSIX)."""
+    if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW') or not os.supports_dir_fd:
+        parent = source.parent.resolve(strict=False)
+        if not any(_is_relative_to(parent, root) for root in roots):
+            raise ValueError('destination parent changed outside allowed roots')
+        source.parent.mkdir(parents=True, exist_ok=True)
+        parent = source.parent.resolve(strict=True)
+        if not any(_is_relative_to(parent, root) for root in roots):
+            raise ValueError('destination parent changed outside allowed roots')
+        fd, name = tempfile.mkstemp(prefix=f'.{source.name}.restore-', dir=parent)
+        return fd, name, None, source.name
+
+    root = next((r for r in roots if _is_relative_to(source, r)), None)
+    if root is None:
+        raise ValueError('destination parent changed outside allowed roots')
+    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW
+    current = os.open(root, flags)
+    try:
+        relative_parent = source.parent.relative_to(root)
+        for part in relative_parent.parts:
+            if part in ('', '.'):
+                continue
+            try:
+                child = os.open(part, flags, dir_fd=current)
+            except FileNotFoundError:
+                os.mkdir(part, dir_fd=current)
+                child = os.open(part, flags, dir_fd=current)
+            os.close(current)
+            current = child
+        leaf = source.name
+        fd, temp_name = _create_stage_at(current, leaf)
+        return fd, temp_name, current, leaf
+    except Exception:
+        os.close(current)
+        raise
+
+
+def _create_stage_at(parent_fd: int, leaf: str) -> tuple[int, str]:
+    import secrets
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+    for _ in range(100):
+        name = f'.{leaf}.restore-{secrets.token_hex(8)}'
+        try:
+            return os.open(name, flags, 0o600, dir_fd=parent_fd), name
+        except FileExistsError:
+            continue
+    raise FileExistsError('unable to create unique restore staging file')
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

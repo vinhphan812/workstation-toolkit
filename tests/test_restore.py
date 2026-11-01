@@ -181,6 +181,37 @@ def test_restore_rejects_non_absolute_destination(tmp_path):
         maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
 
 
+def test_restore_refuses_parent_symlink_swap_before_replace(tmp_path, monkeypatch):
+    root = tmp_path / 'allowed'
+    parent = root / 'nested'
+    root.mkdir()
+    parent.mkdir()
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    target = parent / 'victim.txt'
+    target.write_text('original')
+    payload = tmp_path / 'payload'
+    payload.write_text('new bytes')
+    manifest = _write_manifest(tmp_path / 'manifest.json', [{
+        'source': str(target), 'backup': str(payload), 'status': 'backed_up',
+        'sha256': hashlib.sha256(b'new bytes').hexdigest(),
+    }])
+    real_open_parent = maintenance._open_destination_parent
+    def swap_then_open(source, roots):
+        parent.rename(root / 'moved')
+        try:
+            parent.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip('directory symlinks unavailable')
+        return real_open_parent(source, roots)
+    monkeypatch.setattr(maintenance, '_open_destination_parent', swap_then_open)
+    report = maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(root)])
+    assert not report['restored']
+    assert report['failed'][0]['reason'].startswith('destination parent unavailable:')
+    assert not (outside / 'victim.txt').exists()
+    assert (root / 'moved' / 'victim.txt').read_text() == 'original'
+
+
 def test_restore_accepts_backup_files_manifest(tmp_path, monkeypatch):
     import workstation.core.backup as backup_module
     monkeypatch.setattr(backup_module, 'BACKUPS_DIR', tmp_path / 'backups')
