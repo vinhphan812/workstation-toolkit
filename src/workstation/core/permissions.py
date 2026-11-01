@@ -361,12 +361,34 @@ def rewrite_private_text(path: Path | str, text: str) -> PermissionResult:
                                     detail=f'unable to make the file writable: {exc}')
     try:
         target.write_text(text, encoding='utf-8')
-    finally:
+    except BaseException:
         if needs_write:
             try:
                 os.chmod(target, current)
-            except OSError:
-                pass
+            except OSError as restore_error:
+                raise OSError(
+                    f'failed to restore original mode {current:#o} after write failure: '
+                    f'{restore_error}'
+                ) from restore_error
+        raise
+    if needs_write:
+        try:
+            os.chmod(target, current)
+        except OSError as exc:
+            return PermissionResult(
+                STATUS_FAILED, 'posix', str(target), mode=None,
+                detail=f'unable to restore original mode {current:#o}: {exc}',
+            )
+    try:
+        observed = stat.S_IMODE(target.stat().st_mode)
+    except OSError as exc:
+        return PermissionResult(STATUS_FAILED, 'posix', str(target),
+                                detail=f'unable to verify restored mode: {exc}')
+    if observed != current:
+        return PermissionResult(
+            STATUS_FAILED, 'posix', str(target), mode=observed,
+            detail=f'restored mode {observed:#o} differs from original {current:#o}',
+        )
     if current == FILE_MODE:
         # Re-asserting the mode the file already has changes nothing, but
         # it reports the outcome as enforced instead of merely preserved.
@@ -737,8 +759,8 @@ def _windows_enforce(path: Path, *, is_directory: bool, created: bool) -> Permis
 
     after = _read_dacl(path)
     if after is None:
-        return PermissionResult(STATUS_UNSUPPORTED, platform, str(path), trustees=existing,
-                                detail='; '.join(errors) or 'unable to verify the security descriptor')
+        return PermissionResult(STATUS_FAILED, platform, str(path), trustees=existing,
+                                detail='unable to verify the resulting security descriptor')
     final = tuple(_dacl_sids(after))
     leftover = [sid for sid in final if sid not in allowed]
     if leftover or not _owner_has_full_control(after, owner):

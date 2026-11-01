@@ -96,6 +96,29 @@ def test_rewrite_private_text_keeps_the_file_owner_only(tmp_path):
 
 
 @posix_only
+def test_rewrite_private_text_reports_failure_to_restore_stricter_mode(tmp_path, monkeypatch):
+    target = tmp_path / 'manifest.json'
+    permissions.write_private_text(target, '{"a": 1}')
+    target.chmod(0o400)
+    real_chmod = os.chmod
+    calls = 0
+
+    def fail_restore(path, mode):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError('restore denied')
+        return real_chmod(path, mode)
+
+    monkeypatch.setattr(permissions.os, 'chmod', fail_restore)
+    result = permissions.rewrite_private_text(target, '{"a": 2}')
+    assert result.status == permissions.STATUS_FAILED
+    assert result.owner_only is False
+    assert 'unable to restore original mode' in result.detail
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@posix_only
 def test_rewrite_private_text_restores_the_mode_when_the_write_fails(tmp_path, monkeypatch):
     target = tmp_path / 'manifest.json'
     permissions.write_private_text(target, '{"a": 1}')
@@ -265,6 +288,28 @@ def test_a_failing_icacls_is_reported_and_never_claimed_as_enforced(tmp_path, mo
     result = permissions.enforce_directory(target)
     assert not result.owner_only
     assert result.status == permissions.STATUS_FAILED
+
+
+@windows_only
+def test_unreadable_post_enforcement_dacl_is_a_failure(tmp_path, monkeypatch):
+    target = tmp_path / 'private'
+    target.mkdir()
+    real_read = permissions._read_dacl
+    calls = 0
+
+    def unreadable_after_write(path):
+        nonlocal calls
+        calls += 1
+        if calls >= 2:
+            return None
+        return real_read(path)
+
+    monkeypatch.setattr(permissions, '_read_dacl', unreadable_after_write)
+    result = permissions.enforce_directory(target)
+    assert result.status == permissions.STATUS_FAILED
+    assert result.unsupported is False
+    assert not result.owner_only
+    assert 'unable to verify' in result.detail
 
 
 @windows_only
