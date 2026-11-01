@@ -67,25 +67,31 @@ def test_restore_preserves_corrupt_stage_evidence_and_destination(tmp_path, monk
         'source': str(target), 'backup': str(backup), 'status': 'backed_up',
         'sha256': _sha256(backup),
     }])
-    if hasattr(maintenance, '_hash_staged_file'):
-        import os
-        real_hash_staged_file = maintenance._hash_staged_file
-        corrupted = False
-        def corrupt_stage_before_hash(parent_fd, name, *args, **kwargs):
+    import os
+    corrupted = False
+    if os.name == 'posix' and hasattr(os, 'O_NOFOLLOW') and os.open in os.supports_dir_fd:
+        real_open = maintenance.os.open
+        def corrupt_stage_on_reread(file, flags, *args, **kwargs):
             nonlocal corrupted
-            if not corrupted:
+            if (
+                not corrupted
+                and isinstance(file, str)
+                and '.restore-' in file
+                and kwargs.get('dir_fd') is not None
+                and flags & os.O_ACCMODE == os.O_RDONLY
+                and not flags & (os.O_WRONLY | os.O_CREAT)
+            ):
                 corrupted = True
-                fd = os.open(name, os.O_WRONLY | os.O_TRUNC, dir_fd=parent_fd)
+                fd = real_open(file, os.O_WRONLY | os.O_TRUNC, dir_fd=kwargs['dir_fd'])
                 try:
                     os.write(fd, b'corrupted staged bytes')
                 finally:
                     os.close(fd)
-            return real_hash_staged_file(parent_fd, name, *args, **kwargs)
-        monkeypatch.setattr(maintenance, '_hash_staged_file', corrupt_stage_before_hash)
+            return real_open(file, flags, *args, **kwargs)
+        monkeypatch.setattr(maintenance.os, 'open', corrupt_stage_on_reread)
     else:
         import builtins
         real_open = builtins.open
-        corrupted = False
         def corrupt_stage_on_reread(file, mode='r', *args, **kwargs):
             nonlocal corrupted
             if not corrupted and isinstance(file, (str, Path)) and '.restore-' in str(file) and mode == 'rb':
@@ -94,6 +100,7 @@ def test_restore_preserves_corrupt_stage_evidence_and_destination(tmp_path, monk
             return real_open(file, mode, *args, **kwargs)
         monkeypatch.setattr(builtins, 'open', corrupt_stage_on_reread)
     report = maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
+    assert corrupted, 'test must corrupt the staged file before its verification read'
     assert not report['restored']
     mismatch = report['failed'][0]
     assert report['ok'] is False
