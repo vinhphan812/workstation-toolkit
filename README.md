@@ -149,7 +149,12 @@ Platform adapters implement non-portable operations and must report an explicit 
 | Logs | Event Log | `journalctl` | `log show` |
 | Package manager | winget | apt/dnf/pacman/zypper | Homebrew |
 
-## Device-local configuration
+### Publish with immutable action pins
+
+The release workflow pins third-party actions to verified full commit SHAs and includes the upstream version in a comment. To update a pin, select the intended upstream release, verify its full commit SHA from the official repository/tag (and review the tag's commit/signature where available), update the SHA and version comment together, then run the release-workflow policy test and inspect the workflow diff. Never replace the SHA with a mutable version tag.
+
+Release-tag creation must be protected by repository rulesets or tag protection configured by a repository administrator. That setting is external to this source tree; verify it in GitHub repository settings before enabling releases. The workflow policy test enforces immutable action references and least-privilege permissions, but cannot prove GitHub-side tag protection.
+
 
 `config/repos.json` and `config/projects.json` are deliberately gitignored. They describe the current machine and should not be committed.
 
