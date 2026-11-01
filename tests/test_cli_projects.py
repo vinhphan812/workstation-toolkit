@@ -38,3 +38,12 @@ def test_cli_dry_run_reports_command_mode(tmp_path, monkeypatch, capsys):
     report = _run(['workstation', 'project', 'demo', 'test'], capsys, monkeypatch)
     assert report['dry_run'] is True
     assert report['mode'] == 'argv'
+
+
+def test_cli_shell_opt_in_from_environment(tmp_path, monkeypatch, capsys):
+    marker = tmp_path / 'ran-from-environment.txt'
+    _use(monkeypatch, {'name': 'demo', 'path': str(tmp_path), 'commands': {'test': {'shell': f'echo owned > "{marker}"'}}, 'timeouts': {}})
+    monkeypatch.setenv('WORKSTATION_ALLOW_SHELL', '1')
+    report = _run(['workstation', 'project', 'demo', 'test', '--execute'], capsys, monkeypatch)
+    assert report['ok'] is True
+    assert marker.exists()
