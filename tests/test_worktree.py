@@ -78,16 +78,21 @@ def test_registration_race_after_quarantine_refuses_and_restores_candidate(tmp_p
     wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
 
     real_rename = module.os.rename
-    calls = [0]
+    rename_calls = []
 
     def register_after_quarantine(source, destination, *_args):
         result = real_rename(source, destination)
-        calls[0] += 1
+        rename_calls.append((source, destination))
+        if len(rename_calls) == 1:
+            # Simulate `git worktree add` registering the original path after
+            # deletion has atomically moved it aside but before the final query.
+            module._run_git = lambda *_: (f"worktree {target}\nbranch refs/heads/live", 0)
         return result
 
     monkeypatch.setattr(module.os, "rename", register_after_quarantine)
-    monkeypatch.setattr(module, "_run_git", lambda *_: (f"worktree {target}\nbranch refs/heads/live", 0))
+    monkeypatch.setattr(module, "_run_git", lambda *_: ("", 0))
     assert delete_worktree(wt) is False
+    assert len(rename_calls) == 2  # quarantine, then restore; never delete
     assert (target / "safe.txt").read_text() == "keep me"
     assert sorted(p.name for p in (repo / ".worktrees").iterdir()) == ["candidate"]
 
