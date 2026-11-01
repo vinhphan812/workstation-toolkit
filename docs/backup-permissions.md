@@ -24,8 +24,12 @@ access, and every other trustee is dropped.
 attempt re-reads the resulting permissions and compares them against the
 policy. When a filesystem or platform cannot express the policy — FAT or
 exFAT volumes, some network shares, a missing `icacls` — the outcome is
-reported as `unsupported` instead of `enforced`. An unexpected error is
-reported as `failed`.
+reported as `unsupported` instead of `enforced`. An unexpected error, and
+an outcome that cannot be verified at all — a security descriptor that
+cannot be read back, or an owner that cannot be identified — is reported
+as `failed`. An unverifiable outcome is never downgraded to `unsupported`:
+it fails closed instead, because a result that cannot be checked must not
+be mistaken for one that was.
 
 **The owner's own access is never broken.** On Windows the owner is granted
 access *before* inheritance is removed: stripping inherited entries from a
@@ -49,7 +53,9 @@ owner-only and then rewritten with its summary. A file the owner may read
 but not write cannot be replaced in place, so the owner's write bit is added
 for the duration of that write and the original mode is restored afterwards,
 including when the write itself fails. The artifact stays owner-only
-throughout, and a stricter pre-existing mode is preserved.
+throughout, and a stricter pre-existing mode is preserved. When the
+original mode cannot be restored the rewrite is reported as `failed`
+rather than silently succeeding.
 
 ## What the caller sees
 
