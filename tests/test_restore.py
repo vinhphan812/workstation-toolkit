@@ -106,7 +106,8 @@ def test_restore_preserves_corrupt_stage_evidence_and_destination(tmp_path, monk
     assert report['ok'] is False
     assert mismatch['reason'] == 'post-copy checksum mismatch'
     assert mismatch['expected_sha256'] == _sha256(backup)
-    evidence = Path(mismatch['evidence_path'])
+    evidence_path = Path(mismatch['evidence_path'])
+    evidence = evidence_path if evidence_path.is_absolute() else tmp_path / evidence_path
     assert mismatch['actual_sha256'] == _sha256(evidence)
     assert mismatch['source_preserved'] is True
     assert mismatch['backup_preserved'] is True
