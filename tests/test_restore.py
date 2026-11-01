@@ -59,7 +59,6 @@ def test_cmd_restore_exits_nonzero_when_restore_report_fails(monkeypatch, capsys
 
 
 def test_restore_preserves_corrupt_stage_evidence_and_destination(tmp_path, monkeypatch):
-    import builtins
     target = tmp_path / 'target.txt'
     target.write_text('original')
     backup = tmp_path / 'backup.txt'
@@ -68,15 +67,32 @@ def test_restore_preserves_corrupt_stage_evidence_and_destination(tmp_path, monk
         'source': str(target), 'backup': str(backup), 'status': 'backed_up',
         'sha256': _sha256(backup),
     }])
-    real_open = builtins.open
-    corrupted = False
-    def corrupt_stage_on_reread(file, mode='r', *args, **kwargs):
-        nonlocal corrupted
-        if not corrupted and isinstance(file, (str, Path)) and '.restore-' in str(file) and mode == 'rb':
-            corrupted = True
-            Path(file).write_bytes(b'corrupted staged bytes')
-        return real_open(file, mode, *args, **kwargs)
-    monkeypatch.setattr(builtins, 'open', corrupt_stage_on_reread)
+    if hasattr(maintenance, '_hash_staged_file'):
+        import os
+        real_hash_staged_file = maintenance._hash_staged_file
+        corrupted = False
+        def corrupt_stage_before_hash(parent_fd, name, *args, **kwargs):
+            nonlocal corrupted
+            if not corrupted:
+                corrupted = True
+                fd = os.open(name, os.O_WRONLY | os.O_TRUNC, dir_fd=parent_fd)
+                try:
+                    os.write(fd, b'corrupted staged bytes')
+                finally:
+                    os.close(fd)
+            return real_hash_staged_file(parent_fd, name, *args, **kwargs)
+        monkeypatch.setattr(maintenance, '_hash_staged_file', corrupt_stage_before_hash)
+    else:
+        import builtins
+        real_open = builtins.open
+        corrupted = False
+        def corrupt_stage_on_reread(file, mode='r', *args, **kwargs):
+            nonlocal corrupted
+            if not corrupted and isinstance(file, (str, Path)) and '.restore-' in str(file) and mode == 'rb':
+                corrupted = True
+                Path(file).write_bytes(b'corrupted staged bytes')
+            return real_open(file, mode, *args, **kwargs)
+        monkeypatch.setattr(builtins, 'open', corrupt_stage_on_reread)
     report = maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert not report['restored']
     mismatch = report['failed'][0]
