@@ -11,13 +11,61 @@ def test_never_delete_known_worktree(tmp_path):
     assert d.exists()
 
 def test_delete_orphaned_empty_worktree(tmp_path):
-    d = tmp_path / "orphaned"
-    d.mkdir()
+    repo = tmp_path / "repo"
+    d = repo / ".worktrees" / "orphaned"
+    d.mkdir(parents=True)
     (d / "file.txt").write_text("temp")
-    wt = WorktreeInfo(path=str(d), repo="repo", is_known=False, is_orphaned=True,
+    wt = WorktreeInfo(path=str(d), repo=str(repo), is_known=False, is_orphaned=True,
                       is_locked=False, size_mb=0, branch="unknown")
-    assert delete_worktree(wt) is True
+    with patch("workstation.core.worktree._run_git", return_value=("", 0)):
+        assert delete_worktree(wt) is True
     assert not d.exists()
+
+
+def test_refuse_path_escape_and_unclassified(tmp_path):
+    from workstation.core.worktree import delete_worktree
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    wt = WorktreeInfo(str(outside), str(repo), False, True, False, 0, "unknown")
+    with patch("workstation.core.worktree.get_git_worktrees", return_value={}):
+        assert not delete_worktree(wt)
+    assert outside.exists()
+    inside = repo / ".worktrees" / "candidate"
+    inside.mkdir(parents=True)
+    wt.path = str(inside)
+    wt.is_orphaned = False
+    assert not delete_worktree(wt)
+    assert inside.exists()
+
+
+def test_symlink_escape_is_not_deleted(tmp_path):
+    repo = tmp_path / "repo"
+    root = repo / ".worktrees"
+    root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = root / "escape"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        import pytest
+        pytest.skip("directory symlinks unavailable")
+    wt = WorktreeInfo(str(link), str(repo), False, True, False, 0, "unknown")
+    assert not delete_worktree(wt)
+    assert outside.exists()
+    assert link.is_symlink()
+
+
+def test_registered_recheck_refuses_stale_orphan(tmp_path):
+    repo = tmp_path / "repo"
+    target = repo / ".worktrees" / "candidate"
+    target.mkdir(parents=True)
+    wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
+    with patch("workstation.core.worktree.get_git_worktrees", return_value={os.path.normcase(os.path.normpath(str(target))): "branch"}):
+        assert not delete_worktree(wt)
+    assert target.exists()
 
 
 def test_parses_detached_registered_worktree(tmp_path, monkeypatch):

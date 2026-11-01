@@ -118,14 +118,34 @@ def audit_all_worktrees(repos: List[str]) -> dict:
     }
 
 def delete_worktree(wt: WorktreeInfo, force: bool = True) -> bool:
-    """Delete an orphaned worktree directory."""
+    """Delete a positively classified orphan beneath this repo's .worktrees."""
     import shutil
-    if wt.is_known:
-        return False  # Don't delete known worktrees
+    if wt.is_known or not wt.is_orphaned or wt.is_locked:
+        return False
     try:
-        shutil.rmtree(wt.path)
+        repo = os.path.realpath(wt.repo)
+        root = os.path.realpath(os.path.join(repo, ".worktrees"))
+        candidate = os.path.abspath(wt.path)
+        target = os.path.realpath(candidate)
+        # Require an immediate child and reject symlinks in the supplied path.
+        if os.path.commonpath([root, target]) != root or target == root:
+            return False
+        if os.path.dirname(candidate) != os.path.abspath(os.path.join(repo, ".worktrees")):
+            return False
+        if os.path.islink(candidate) or target != candidate or not os.path.isdir(target):
+            return False
+        # Re-query once; caller-supplied WorktreeInfo flags are not authority.
+        stdout, code = _run_git(repo, "worktree", "list", "--porcelain")
+        if code != 0:
+            return False
+        registered = {os.path.normcase(os.path.normpath(line[9:].strip()))
+                      for line in stdout.splitlines() if line.startswith("worktree ")}
+        normalized = os.path.normcase(os.path.normpath(target))
+        if normalized in registered:
+            return False
+        shutil.rmtree(target)
         return True
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 def delete_orphaned(report: dict, confirm: bool = True) -> List[str]:
