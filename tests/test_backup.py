@@ -216,4 +216,3 @@ def test_backup_does_not_widen_a_stricter_existing_backup_root(tmp_path, monkeyp
         return
     assert stat.S_IMODE(root.stat().st_mode) == 0o500
     assert Path(result["manifest"]).is_file()
-
