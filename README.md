@@ -153,6 +153,8 @@ Platform adapters implement non-portable operations and must report an explicit 
 
 `config/repos.json` and `config/projects.json` are deliberately gitignored. They describe the current machine and should not be committed.
 
+JSON is the only configuration format currently loaded by the toolkit. The `*.toml.example` files are commented, illustrative references only; they are not parsed or merged. Use the JSON examples and `config/local.json` for device-local settings.
+
 ```json
 {
   "repos": [
@@ -163,7 +165,7 @@ Platform adapters implement non-portable operations and must report an explicit 
 }
 ```
 
-Copy the `*.example` files on a new machine, adjust the paths, and run the same Python commands. You can also override paths through environment variables:
+Copy the JSON `*.example` files on a new machine, adjust the paths, and run the same Python commands. You can also override paths through environment variables:
 
 | Variable | Meaning |
 |---|---|
