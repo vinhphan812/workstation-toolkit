@@ -18,10 +18,16 @@ granted them access, and every other trustee is dropped.
 
 **Never claim protection that was not verified.**  Every enforcement
 attempt re-reads the resulting permissions and compares them against the
-policy.  When a filesystem or platform cannot express the policy -- FAT or
-exFAT volumes, some network shares, a missing ``icacls`` -- the result is
-reported as ``unsupported`` instead of being reported as enforced, and an
-unexpected error is reported as ``failed``.
+policy.  Three outcomes are told apart.  ``enforced`` and ``preserved``
+mean the policy is in force and was verified.  ``unsupported`` means the
+filesystem or the platform positively reports that it cannot express the
+policy -- FAT or exFAT volumes, some network shares, a missing ``icacls``
+-- so the caller is told that the artifact is not protected.  ``failed``
+means the outcome could not be established at all: the permissions could
+not be read back, so the enforcement is not known to have taken effect.
+An unverifiable outcome is never downgraded to ``unsupported``: it fails
+closed instead, because a result that cannot be checked must not be
+mistaken for a result that was checked.
 
 **Never break the owner's own access.**  On Windows the owner is granted
 access *before* inheritance is removed.  Stripping inherited entries from
@@ -689,13 +695,27 @@ def _windows_enforce(path: Path, *, is_directory: bool, created: bool) -> Permis
                                 detail='the path does not exist')
     user_sid = _current_user_sid()
     if not user_sid:
-        return PermissionResult(STATUS_UNSUPPORTED, platform, str(path),
-                                detail='unable to determine the current user SID')
+        # The owner cannot be identified, so the DACL that would be
+        # enforced cannot be verified either.  That is an unverifiable
+        # outcome, not a filesystem that reports itself as unable to
+        # express the policy, so it fails closed.
+        return PermissionResult(
+            STATUS_FAILED, platform, str(path),
+            detail='unable to determine the current user SID, so the owner-only '
+                   'DACL cannot be enforced or verified',
+        )
 
     dacl, owner_sid = _read_security(path)
     if dacl is None:
-        return PermissionResult(STATUS_UNSUPPORTED, platform, str(path),
-                                detail='unable to read the security descriptor')
+        # The descriptor could not be read, so the DACL that would be
+        # enforced cannot be verified either.  A filesystem that cannot
+        # express the policy is identified by the icacls output further
+        # down; an unreadable descriptor is not that, so it fails closed.
+        return PermissionResult(
+            STATUS_FAILED, platform, str(path),
+            detail='unable to read the security descriptor, so the owner-only '
+                   'DACL cannot be enforced or verified',
+        )
 
     existing = tuple(_dacl_sids(dacl))
     owner = owner_sid or user_sid
@@ -766,9 +786,16 @@ def _windows_enforce(path: Path, *, is_directory: bool, created: bool) -> Permis
     if leftover or not _owner_has_full_control(after, owner):
         # The descriptor could not be reduced to the owner.  Report why
         # instead of claiming protection that is not in force.
-        detail = '; '.join(errors) or f'the resulting DACL still grants access to {sorted(leftover)}'
-        status = STATUS_UNSUPPORTED if _icacls_unsupported(detail) else STATUS_FAILED
-        return PermissionResult(status, platform, str(path), trustees=final, detail=detail)
+        reason = '; '.join(errors) or f'the resulting DACL still grants access to {sorted(leftover)}'
+        if _icacls_unsupported(reason):
+            # The filesystem positively reports that it cannot express the
+            # policy, so it is named as unsupported rather than failed.
+            return PermissionResult(
+                STATUS_UNSUPPORTED, platform, str(path), trustees=final,
+                detail=f'this filesystem does not support the owner-only DACL: {reason}',
+            )
+        return PermissionResult(STATUS_FAILED, platform, str(path), trustees=final,
+                                detail=reason)
     if errors:
         # The end state is verified, but something went wrong on the way.
         return PermissionResult(STATUS_ENFORCED, platform, str(path), trustees=final,

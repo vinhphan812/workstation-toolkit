@@ -313,6 +313,61 @@ def test_unreadable_post_enforcement_dacl_is_a_failure(tmp_path, monkeypatch):
 
 
 @windows_only
+def test_unreadable_security_descriptor_is_a_failure(tmp_path, monkeypatch):
+    # The descriptor cannot be read, so the DACL that would be enforced
+    # cannot be verified either.  That is an unverifiable outcome, not a
+    # filesystem that reports itself as unable to express the policy.
+    target = tmp_path / 'private'
+    target.mkdir()
+
+    def unreadable(_path):
+        return None, None
+
+    monkeypatch.setattr(permissions, '_read_security', unreadable)
+    result = permissions.enforce_directory(target)
+    assert result.status == permissions.STATUS_FAILED
+    assert result.unsupported is False
+    assert not result.owner_only
+    assert 'cannot be enforced or verified' in result.detail
+
+
+@windows_only
+def test_an_unknown_owner_sid_is_a_failure(tmp_path, monkeypatch):
+    # Without the current user SID the DACL cannot be restricted, and a
+    # DACL that cannot be restricted cannot be verified either.
+    target = tmp_path / 'private'
+    target.mkdir()
+    monkeypatch.setattr(permissions, '_current_user_sid', lambda: None)
+    result = permissions.enforce_directory(target)
+    assert result.status == permissions.STATUS_FAILED
+    assert result.unsupported is False
+    assert not result.owner_only
+    assert 'cannot be enforced or verified' in result.detail
+
+
+@windows_only
+def test_a_filesystem_that_reports_itself_unsupported_is_not_a_failure(tmp_path, monkeypatch):
+    # A filesystem that positively reports that it cannot express the
+    # policy stays 'unsupported': it is a documented limitation, not an
+    # outcome that could not be checked.
+    target = tmp_path / 'private'
+    target.mkdir()
+    # Give the directory a foreign trustee, so the enforcement has
+    # something to remove and the outcome cannot be 'preserved'.
+    assert permissions._run_icacls(target, ['/grant', '*S-1-1-0:(OI)(CI)(M)'])[0] == 0
+
+    def boom(*_args, **_kwargs):
+        return 1, 'This operation is not supported on this filesystem'
+
+    monkeypatch.setattr(permissions, '_run_icacls', boom)
+    result = permissions.enforce_directory(target)
+    assert result.status == permissions.STATUS_UNSUPPORTED
+    assert result.unsupported is True
+    assert not result.owner_only
+    assert 'does not support the owner-only DACL' in result.detail
+
+
+@windows_only
 def test_a_missing_icacls_is_reported_as_unsupported(tmp_path, monkeypatch):
     target = tmp_path / 'private'
     target.mkdir()
