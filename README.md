@@ -84,6 +84,12 @@ python -m workstation project
 python -m workstation project mcp-java-sdk test
 python -m workstation project mcp-java-sdk test --execute
 
+`--execute` runs locally configured commands with the current user's privileges.
+Prefer argv arrays for literal arguments. Legacy string commands require
+`"trusted_shell": true` in that project's configuration and are passed to the
+platform shell. Project command, environment, and timeout configuration must be
+trusted; do not enable shell execution for untrusted configuration.
+
 # Source LOC audit; reports physical/code/blank/comment-only lines
 python -m workstation loc --project mcp-java-sdk --top 30
 python -m workstation --save-report loc --path D:/android/mcp-java-sdk
