@@ -1,11 +1,28 @@
 """Safe timestamped backups for config and SQLite state."""
 from __future__ import annotations
-import hashlib, json, shutil
+import hashlib, json, os, shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from workstation.config import TOOLKIT_ROOT
 
 BACKUPS_DIR = TOOLKIT_ROOT / "backups"
+
+
+def _restrict_directory(path: Path) -> None:
+    """Restrict an existing backup root; POSIX chmod changes it atomically."""
+    if os.name != "nt":
+        path.chmod(0o700)
+
+
+def _copy_private(source: Path, target: Path) -> None:
+    """Create a private POSIX copy from the first instant it exists."""
+    if os.name == "nt":
+        shutil.copy2(source, target)
+        return
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as output, source.open("rb") as input_file:
+        shutil.copyfileobj(input_file, output)
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -27,12 +44,14 @@ def backup_files(label: str, paths: list[str], *, allow_partial: bool = False) -
     existing = [Path(raw) for raw in paths if Path(raw).is_file()]
     required = sum(item.stat().st_size for item in existing) + 64 * 1024 * 1024
     BACKUPS_DIR.mkdir(exist_ok=True)
+    _restrict_directory(BACKUPS_DIR)
     available = _available_bytes(BACKUPS_DIR)
     if available < required and not allow_partial:
         raise RuntimeError(f"Insufficient backup space: need {required / (1024**3):.2f} GB, have {available / (1024**3):.2f} GB")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     destination = BACKUPS_DIR / f"{stamp}_{label}"
-    destination.mkdir(parents=True, exist_ok=False)
+    destination.mkdir(parents=True, exist_ok=False, mode=0o700)
+    _restrict_directory(destination)
     entries = []
     for raw in paths:
         source = Path(raw)
@@ -40,12 +59,17 @@ def backup_files(label: str, paths: list[str], *, allow_partial: bool = False) -
             entries.append({"source": str(source), "status": "missing"})
             continue
         target = destination / source.name
-        shutil.copy2(source, target)
+        _copy_private(source, target)
         entries.append({
             "source": str(source), "backup": str(target), "size": target.stat().st_size,
             "sha256": _sha256(target), "status": "backed_up",
         })
     manifest = {"created_at": datetime.now(timezone.utc).isoformat(), "label": label, "files": entries}
     manifest_path = destination / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    if os.name == "nt":
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    else:
+        fd = os.open(manifest_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(json.dumps(manifest, indent=2))
     return {"directory": str(destination), "manifest": str(manifest_path), "files": entries}

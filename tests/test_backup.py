@@ -22,3 +22,21 @@ def test_backup_preflight_blocks_before_creating_destination(tmp_path, monkeypat
     with pytest.raises(RuntimeError, match='Insufficient backup space'):
         backup.backup_files('blocked', [str(source)])
     assert list((tmp_path / 'backups').glob('*')) == []
+
+
+def test_backup_permissions_are_owner_only_on_posix(tmp_path, monkeypatch):
+    import os
+    import stat
+    import workstation.core.backup as backup
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+    result = backup.backup_files("permissions", [str(source)])
+
+    if os.name != "nt":
+        backup_dir = Path(result["directory"])
+        assert stat.S_IMODE(backup.BACKUPS_DIR.stat().st_mode) == 0o700
+        assert stat.S_IMODE(backup_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(Path(result["files"][0]["backup"]).stat().st_mode) == 0o600
+        assert stat.S_IMODE(Path(result["manifest"]).stat().st_mode) == 0o600
