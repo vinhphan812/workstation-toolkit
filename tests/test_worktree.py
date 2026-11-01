@@ -77,9 +77,6 @@ def test_registration_race_after_quarantine_refuses_and_restores_candidate(tmp_p
     (target / "safe.txt").write_text("keep me")
     wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
 
-    def register_after_quarantine(_repo, *_args):
-        return "", 0
-
     real_rename = module.os.rename
     calls = [0]
 
