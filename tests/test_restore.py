@@ -191,3 +191,22 @@ def test_restore_accepts_backup_files_manifest(tmp_path, monkeypatch):
     report = maintenance.restore_backup(created['manifest'], execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert report['restored'] == [str(source)]
     assert source.read_text() == 'backup data'
+def test_restore_round_trip_reproduces_both_same_named_sources(tmp_path, monkeypatch):
+    import workstation.core.backup as backup_module
+    monkeypatch.setattr(backup_module, 'BACKUPS_DIR', tmp_path / 'backups')
+    left = tmp_path / 'left' / 'same.txt'
+    right = tmp_path / 'right' / 'same.txt'
+    left.parent.mkdir(); right.parent.mkdir()
+    left.write_bytes(b'left bytes'); right.write_bytes(b'right bytes')
+    created = backup_module.backup_files('collision', [str(left), str(right)])
+    payloads = [Path(entry['backup']) for entry in created['files']]
+    assert len({str(payload) for payload in payloads}) == 2
+    for entry, payload in zip(created['files'], payloads):
+        assert entry['sha256'] == hashlib.sha256(payload.read_bytes()).hexdigest()
+    left.write_bytes(b'corrupted left'); right.write_bytes(b'corrupted right')
+    report = maintenance.restore_backup(created['manifest'], execute=True, yes=True, allowed_roots=[str(tmp_path)])
+    assert report['ok'] is True
+    assert report['failed'] == []
+    assert sorted(Path(item) for item in report['restored']) == sorted([left.resolve(), right.resolve()])
+    assert left.read_bytes() == b'left bytes'
+    assert right.read_bytes() == b'right bytes'

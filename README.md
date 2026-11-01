@@ -9,6 +9,8 @@ A **cross-platform workstation operations toolkit** for Windows, Linux, and macO
 - Git worktree deletion refuses Git-registered worktrees.
 - Git identity remediation only unsets known unsafe local identities, such as `hermes@agent.local`; it never writes a local identity.
 - Large Hermes SQLite databases are not integrity-scanned in the fast health check; the command reports that this work is deferred rather than blocking for minutes.
+- Backup payloads are named so that same-named sources never share one payload file; every manifest entry records its own payload path and digest.
+- Backup manifests keep the same schema, so manifests written by earlier versions still restore.
 
 ## Requirements
 
