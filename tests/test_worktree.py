@@ -80,12 +80,12 @@ def test_registration_race_after_quarantine_refuses_and_restores_candidate(tmp_p
     real_rename = module.os.rename
     calls = [0]
 
-    def registered_at_boundary(source, destination, *_args):
+    def register_after_quarantine(source, destination, *_args):
         result = real_rename(source, destination)
         calls[0] += 1
         return result
 
-    monkeypatch.setattr(module.os, "rename", registered_at_boundary)
+    monkeypatch.setattr(module.os, "rename", register_after_quarantine)
     monkeypatch.setattr(module, "_run_git", lambda *_: (f"worktree {target}\nbranch refs/heads/live", 0))
     assert delete_worktree(wt) is False
     assert (target / "safe.txt").read_text() == "keep me"
