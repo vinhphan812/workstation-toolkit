@@ -22,3 +22,16 @@ def test_backup_preflight_blocks_before_creating_destination(tmp_path, monkeypat
     with pytest.raises(RuntimeError, match='Insufficient backup space'):
         backup.backup_files('blocked', [str(source)])
     assert list((tmp_path / 'backups').glob('*')) == []
+
+
+def test_backup_rejects_duplicate_basenames_before_copying(tmp_path, monkeypatch):
+    import pytest
+    import workstation.core.backup as backup
+    monkeypatch.setattr(backup, 'BACKUPS_DIR', tmp_path / 'backups')
+    left = tmp_path / 'left' / 'same.txt'
+    right = tmp_path / 'right' / 'same.txt'
+    left.parent.mkdir(); right.parent.mkdir()
+    left.write_bytes(b'left bytes'); right.write_bytes(b'right bytes')
+    with pytest.raises(ValueError, match='basename collision'):
+        backup.backup_files('collision', [str(left), str(right)])
+    assert not list((tmp_path / 'backups').glob('*'))

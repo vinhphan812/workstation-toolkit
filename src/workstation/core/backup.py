@@ -25,6 +25,11 @@ def backup_files(label: str, paths: list[str], *, allow_partial: bool = False) -
     before copying rather than leaving a partial multi-GB backup.
     """
     existing = [Path(raw) for raw in paths if Path(raw).is_file()]
+    # Reject collisions before creating/copying payloads.
+    names = [source.name for source in existing]
+    if len(names) != len(set(names)):
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        raise ValueError(f"Backup payload basename collision(s): {', '.join(duplicates)}")
     required = sum(item.stat().st_size for item in existing) + 64 * 1024 * 1024
     BACKUPS_DIR.mkdir(exist_ok=True)
     available = _available_bytes(BACKUPS_DIR)
