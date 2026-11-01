@@ -114,6 +114,66 @@ def test_backup_removes_the_destination_when_the_manifest_cannot_be_restricted(t
     assert list((tmp_path / "backups").glob("*")) == []
 
 
+def test_backup_removes_the_destination_when_the_manifest_rewrite_fails(tmp_path, monkeypatch):
+    # The manifest rewrite can now fail: the original mode could not be
+    # restored, so the outcome of the rewrite cannot be verified.  The
+    # backup must not keep a destination whose manifest is in that state.
+    import workstation.core.backup as backup
+    import workstation.core.permissions as permissions
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+
+    def boom(*_args, **_kwargs):
+        return permissions.PermissionResult(
+            permissions.STATUS_FAILED, permissions.platform_name(), "manifest",
+            detail="unable to restore original mode 0o400",
+        )
+
+    monkeypatch.setattr(backup.permissions, "rewrite_private_text", boom)
+    import pytest
+    with pytest.raises(RuntimeError, match="could not be restricted"):
+        backup.backup_files("rewrite_failure", [str(source)])
+
+    assert list((tmp_path / "backups").glob("*")) == []
+
+
+def test_backup_fails_closed_when_the_payload_security_descriptor_cannot_be_read(tmp_path, monkeypatch):
+    # The security descriptor of the payload cannot be read, so the
+    # owner-only DACL cannot be enforced and cannot be verified.  The
+    # backup fails closed and leaves no copy of the payload behind.
+    import os
+    import workstation.core.backup as backup
+    import workstation.core.permissions as permissions
+
+    if os.name != "nt":
+        return
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+
+    real_read_security = permissions._read_security
+
+    def unreadable_for_payload(path):
+        # Only the payload's descriptor is unreadable.  The root and the
+        # backup directory stay readable, so the failure is reached on the
+        # payload rather than on the directory.
+        if Path(path).name == "secret.txt":
+            return None, None
+        return real_read_security(path)
+
+    monkeypatch.setattr(permissions, "_read_security", unreadable_for_payload)
+    import pytest
+    with pytest.raises(RuntimeError, match="could not be restricted"):
+        backup.backup_files("unverifiable", [str(source)])
+
+    # The destination is removed, so no unprotected copy of the payload is
+    # left behind.
+    assert list((tmp_path / "backups").glob("*")) == []
+
+
 def test_backup_aborts_and_removes_the_destination_when_a_payload_cannot_be_restricted(tmp_path, monkeypatch):
     import workstation.core.backup as backup
     import workstation.core.permissions as permissions
