@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib, json, os, shutil, sqlite3, stat, subprocess, tempfile
 from pathlib import Path
 from workstation.config import TOOLKIT_ROOT, get_hermes_profile, get_hermes_home
-from workstation.core.backup import backup_files
+from workstation.core.backup import backup_files, _validate_manifest, _is_relative_to, _sha256
 from workstation.core.safety import require_execute, require_free_space
 
 
@@ -16,6 +16,44 @@ def default_backup_targets() -> list[str]:
 
 def create_backup(label: str = 'workstation') -> dict:
     return backup_files(label, default_backup_targets())
+
+
+def plan_restore(manifest_path: str, allowed_roots: list[str] | tuple[str, ...] | None = None) -> dict:
+    """Validate a complete restore plan without creating or changing files."""
+    if not allowed_roots:
+        raise ValueError('restore requires at least one --allowed-root destination')
+    roots = [Path(root).resolve(strict=True) for root in allowed_roots]
+    if not all(root.is_dir() for root in roots):
+        raise ValueError('each allowed root must be an existing directory')
+    manifest_file = Path(manifest_path).resolve(strict=True)
+    manifest = json.loads(manifest_file.read_text(encoding='utf-8'))
+    _validate_manifest(manifest)
+    backup_root = manifest_file.parent.resolve(strict=True)
+    actions = []
+    for index, entry in enumerate(manifest['files']):
+        source = Path(entry['source'])
+        if not source.is_absolute():
+            raise ValueError(f'Invalid backup manifest entry {index}: source must be absolute')
+        source = source.resolve(strict=False)
+        if not any(_is_relative_to(source, root) for root in roots):
+            raise ValueError(f'Invalid backup manifest entry {index}: source is outside allowed roots')
+        if entry['status'] == 'missing':
+            actions.append({'action': 'skip', 'source': str(source), 'reason': 'source missing at backup time'})
+            continue
+        if entry['status'] == 'failed':
+            raise ValueError(f"Invalid backup manifest entry {index}: backup entry failed: {entry.get('reason', 'backup failed')}")
+        if not entry.get('backup') or not entry.get('sha256'):
+            raise ValueError(f'Invalid backup manifest entry {index}: legacy backed_up entry lacks backup path or sha256')
+        payload = Path(entry['backup'])
+        if not payload.is_absolute(): payload = backup_root / payload
+        payload = payload.resolve(strict=True)
+        if not _is_relative_to(payload, backup_root) or not payload.is_file():
+            raise ValueError(f'Invalid backup manifest entry {index}: backup missing or escapes manifest directory')
+        actual = _sha256(payload)
+        if actual.lower() != entry['sha256'].lower():
+            raise ValueError(f'Invalid backup manifest entry {index}: checksum mismatch')
+        actions.append({'action': 'restore', 'source': str(source), 'backup': str(payload), 'sha256': actual})
+    return {'ok': True, 'dry_run': True, 'manifest': str(manifest_file), 'actions': actions}
 
 
 def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False, allowed_roots: list[str] | tuple[str, ...] | None = None) -> dict:
@@ -33,8 +71,7 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
         raise ValueError('each allowed root must be an existing directory')
     manifest_file = Path(manifest_path).resolve(strict=True)
     manifest = json.loads(manifest_file.read_text(encoding='utf-8'))
-    if not isinstance(manifest, dict) or not isinstance(manifest.get('files'), list):
-        raise ValueError("Invalid backup manifest: 'files' must be a list")
+    _validate_manifest(manifest)
     restored, skipped, failed = [], [], []
     backup_root = manifest_file.parent.resolve(strict=True)
     validated = []

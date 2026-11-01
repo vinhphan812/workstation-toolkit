@@ -51,7 +51,7 @@ def test_cmd_restore_exits_nonzero_when_restore_report_fails(monkeypatch, capsys
     import workstation.cli as cli
     import workstation.modules.maintenance as maintenance_module
     monkeypatch.setattr(maintenance_module, 'restore_backup', lambda manifest_path, **kwargs: {'ok': False, 'restored': [], 'skipped': [], 'failed': [{'reason': 'checksum mismatch'}]})
-    args = argparse.Namespace(manifest='manifest.json', execute=True, yes=True, allowed_root=['D:/allowed'], json=False, save_report=None)
+    args = argparse.Namespace(manifest='manifest.json', execute=True, yes=True, allowed_root=['D:/allowed'], plan=False, json=False, save_report=None)
     with pytest.raises(SystemExit) as exc:
         cli.cmd_restore(args)
     assert exc.value.code == 1
@@ -191,3 +191,24 @@ def test_restore_accepts_backup_files_manifest(tmp_path, monkeypatch):
     report = maintenance.restore_backup(created['manifest'], execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert report['restored'] == [str(source)]
     assert source.read_text() == 'backup data'
+
+
+def test_plan_restore_validates_authorization_and_has_zero_mutation(tmp_path):
+    root = tmp_path / 'allowed'; root.mkdir()
+    target = root / 'new' / 'target.txt'
+    payload = tmp_path / 'payload'; payload.write_text('planned')
+    manifest = _write_manifest(tmp_path / 'manifest.json', [{'source': str(target), 'backup': str(payload), 'status': 'backed_up', 'sha256': _sha256(payload)}])
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob('*'))
+    report = maintenance.plan_restore(str(manifest), [str(root)])
+    after = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob('*'))
+    assert report['ok'] and report['dry_run'] and report['actions'][0]['action'] == 'restore'
+    assert before == after and not target.parent.exists()
+
+def test_plan_restore_rejects_later_unauthorized_entry_without_mutation(tmp_path):
+    root = tmp_path / 'allowed'; root.mkdir()
+    payload = tmp_path / 'payload'; payload.write_text('data')
+    entries = [{'source': str(root / 'ok'), 'backup': str(payload), 'status': 'backed_up', 'sha256': _sha256(payload)}, {'source': str(tmp_path / 'outside'), 'backup': str(payload), 'status': 'backed_up', 'sha256': _sha256(payload)}]
+    manifest = _write_manifest(tmp_path / 'manifest.json', entries)
+    with pytest.raises(ValueError, match='outside allowed roots'):
+        maintenance.plan_restore(str(manifest), [str(root)])
+    assert not (root / 'ok').exists() and not (tmp_path / 'outside').exists()
