@@ -319,3 +319,26 @@ def test_plan_restore_rejects_later_unauthorized_entry_without_mutation(tmp_path
     with pytest.raises(ValueError, match='outside allowed roots'):
         maintenance.plan_restore(str(manifest), [str(root)])
     assert not (root / 'ok').exists() and not (tmp_path / 'outside').exists()
+
+
+def test_restore_round_trip_reproduces_both_same_named_sources(tmp_path, monkeypatch):
+    if not maintenance._descriptor_destination_supported():
+        pytest.skip('restore refuses path-based destination writes on this platform')
+    import workstation.core.backup as backup_module
+    monkeypatch.setattr(backup_module, 'BACKUPS_DIR', tmp_path / 'backups')
+    left = tmp_path / 'left' / 'same.txt'
+    right = tmp_path / 'right' / 'same.txt'
+    left.parent.mkdir(); right.parent.mkdir()
+    left.write_bytes(b'left bytes'); right.write_bytes(b'right bytes')
+    created = backup_module.backup_files('collision', [str(left), str(right)])
+    payloads = [Path(entry['backup']) for entry in created['files']]
+    assert len({str(payload) for payload in payloads}) == 2
+    for entry, payload in zip(created['files'], payloads):
+        assert entry['sha256'] == hashlib.sha256(payload.read_bytes()).hexdigest()
+    left.write_bytes(b'corrupted left'); right.write_bytes(b'corrupted right')
+    report = maintenance.restore_backup(created['manifest'], execute=True, yes=True, allowed_roots=[str(tmp_path)])
+    assert report['ok'] is True
+    assert report['failed'] == []
+    assert sorted(Path(item) for item in report['restored']) == sorted([left.resolve(), right.resolve()])
+    assert left.read_bytes() == b'left bytes'
+    assert right.read_bytes() == b'right bytes'

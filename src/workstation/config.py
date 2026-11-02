@@ -1,4 +1,4 @@
-"""Configuration loading from TOML files."""
+"""Configuration loading from JSON files."""
 import os, json
 from pathlib import Path
 

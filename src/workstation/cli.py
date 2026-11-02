@@ -176,7 +176,7 @@ def cmd_project(args):
         print(json.dumps(report, indent=2))
         _emit(report, args, "project_status")
         return
-    report = run_project_command(args.project, args.project_action, execute=args.execute)
+    report = run_project_command(args.project, args.project_action, execute=args.execute, allow_shell=args.allow_shell)
     print(json.dumps(report, indent=2))
     _emit(report, args, f"project_{args.project}_{args.project_action}")
     if not report.get("ok"):
@@ -301,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("toolchain", help="Developer toolchain audit"); p.add_argument("--java", action="store_true"); p.add_argument("--android", action="store_true"); p.set_defaults(func=cmd_toolchain)
     sub.add_parser("forecast", help="Disk pressure and managed-artifact forecast").set_defaults(func=cmd_forecast)
     p = sub.add_parser("kanban", help="Kanban health and optional archiving"); p.add_argument("--archive-plan", type=int, metavar="DAYS", dest="archive", help="List done tasks older than DAYS; omit --execute to preview"); p.add_argument("--board", help="Filter to one board"); p.add_argument("--execute", dest="archive_execute", action="store_true", help="Execute the archive (requires --archive-plan DAYS)"); p.add_argument("-y", "--yes", action="store_true"); p.set_defaults(func=cmd_kanban)
-    p = sub.add_parser("project", help="Config-driven project status and commands"); p.add_argument("project", nargs="?", help="Project name; omit for all statuses"); p.add_argument("project_action", choices=["status", "test", "lint", "clean", "web-test"], default="status", nargs="?"); p.add_argument("--execute", action="store_true", help="Actually run configured command; default is dry-run"); p.set_defaults(func=cmd_project)
+    p = sub.add_parser("project", help="Config-driven project status and commands"); p.add_argument("project", nargs="?", help="Project name; omit for all statuses"); p.add_argument("project_action", choices=["status", "test", "lint", "clean", "web-test"], default="status", nargs="?"); p.add_argument("--execute", action="store_true", help="Actually run configured command; default is dry-run"); p.add_argument("--allow-shell", action="store_true", help="Trust configured shell commands and run them through the shell (required for shell-mode commands)"); p.set_defaults(func=cmd_project)
     p = sub.add_parser("loc", help="Source LOC audit and report"); group = p.add_mutually_exclusive_group(required=True); group.add_argument("--path"); group.add_argument("--project"); p.add_argument("--include-config", action="store_true"); p.add_argument("--top", type=int, default=20); p.set_defaults(func=cmd_loc)
     backup = sub.add_parser("backup", help="Backup local config and Hermes state database")
     backup.add_argument("--label", default="workstation")
