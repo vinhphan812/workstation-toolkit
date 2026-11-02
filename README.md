@@ -7,6 +7,8 @@ A **cross-platform workstation operations toolkit** for Windows, Linux, and macO
 - Read-only commands are the default.
 - Mutating operations require an explicit flag such as `--fix`, `--prune`, or `--execute`.
 - Git worktree deletion refuses Git-registered worktrees.
+- Git worktree deletion also refuses paths with a confirmed operating-system lock.
+- The worktree audit never mutates the filesystem while probing, and reports lock state as `locked`, `unlocked`, or `unknown` rather than guessing. `unknown` means the platform offers no reliable read-only evidence (for example POSIX, where an open file can still be unlinked).
 - Git identity remediation only unsets known unsafe local identities, such as `hermes@agent.local`; it never writes a local identity.
 - Large Hermes SQLite databases are not integrity-scanned in the fast health check; the command reports that this work is deferred rather than blocking for minutes.
 
@@ -94,8 +96,8 @@ python -m workstation git-identity
 # Remove only known-bad local identities, with explicit opt-in
 python -m workstation git-identity --fix
 
-# Audit Git worktrees; no deletion by default
-python -m workstation git-worktrees --dry-run
+# Audit Git worktrees; no deletion by default (read-only)
+python -m workstation git-worktrees
 
 # Docker inspection; no cleanup by default
 python -m workstation docker
