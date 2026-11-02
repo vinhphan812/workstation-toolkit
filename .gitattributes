@@ -1,0 +1,6 @@
+# The repository stores its text files with CRLF line endings, so git's
+# default whitespace check would report every added line as trailing
+# whitespace.  cr-at-eol tells git that the carriage return belongs to
+# the line ending, while blank-at-eol, blank-at-eof and space-before-tab
+# keep the real whitespace errors visible.
+* whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

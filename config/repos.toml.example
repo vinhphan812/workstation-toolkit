@@ -1,5 +1,5 @@
-# Git Repositories
-# Auto-scanned from common roots. Add custom paths here.
-
-repos = []
-exclude_patterns = [".brv", "node_modules/.cache", ".venv", "vendor"]
+# Repository-shaped example (illustrative only).
+# Loaders support JSON only; use config/repos.json. This file is not read or
+# merged by the toolkit.
+# repos = []
+# exclude_patterns = [".brv", "node_modules/.cache", ".venv", "vendor"]

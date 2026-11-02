@@ -1,13 +1,7 @@
-# Workstation Toolkit Configuration
-# Copy to local.toml and edit — local.toml is gitignored
-
-[hermes]
-home = ""           # auto-detected if empty
-profile = "coordinator"  # default profile name
-
-[development]
-# Additional repo roots to scan beyond defaults
-extra_repo_roots = []
-
-[projects]
-# Project definitions — see projects.toml.example
+# The toolkit loads JSON configuration only. This example is illustrative and
+# is not loaded or merged; use config/local.json.
+# {
+#   "hermes": { "home": "", "profile": "coordinator" },
+#   "development": { "extra_repo_roots": [] },
+#   "projects": {}
+# }
