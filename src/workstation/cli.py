@@ -225,10 +225,17 @@ def cmd_backup(args):
     _emit(report, args, f"backup_{args.label}")
 
 
+def cmd_backup_verify(args):
+    from workstation.core.backup import verify_backup
+    report = verify_backup(args.manifest)
+    _emit(report, args, "backup_verify")
+    if not report.get("ok", False): raise SystemExit(1)
+
+
 def cmd_restore(args):
-    from workstation.modules.maintenance import restore_backup
+    from workstation.modules.maintenance import restore_backup, plan_restore
     try:
-        report = restore_backup(args.manifest, execute=args.execute, yes=args.yes, allowed_roots=args.allowed_root)
+        report = plan_restore(args.manifest, allowed_roots=args.allowed_root) if args.plan else restore_backup(args.manifest, execute=args.execute, yes=args.yes, allowed_roots=args.allowed_root)
     except Exception as exc:
         raise SystemExit(str(exc))
     print(json.dumps(report, indent=2))
@@ -296,8 +303,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("kanban", help="Kanban health and optional archiving"); p.add_argument("--archive-plan", type=int, metavar="DAYS", dest="archive", help="List done tasks older than DAYS; omit --execute to preview"); p.add_argument("--board", help="Filter to one board"); p.add_argument("--execute", dest="archive_execute", action="store_true", help="Execute the archive (requires --archive-plan DAYS)"); p.add_argument("-y", "--yes", action="store_true"); p.set_defaults(func=cmd_kanban)
     p = sub.add_parser("project", help="Config-driven project status and commands"); p.add_argument("project", nargs="?", help="Project name; omit for all statuses"); p.add_argument("project_action", choices=["status", "test", "lint", "clean", "web-test"], default="status", nargs="?"); p.add_argument("--execute", action="store_true", help="Actually run configured command; default is dry-run"); p.add_argument("--allow-shell", action="store_true", help="Trust configured shell commands and run them through the shell (required for shell-mode commands)"); p.set_defaults(func=cmd_project)
     p = sub.add_parser("loc", help="Source LOC audit and report"); group = p.add_mutually_exclusive_group(required=True); group.add_argument("--path"); group.add_argument("--project"); p.add_argument("--include-config", action="store_true"); p.add_argument("--top", type=int, default=20); p.set_defaults(func=cmd_loc)
-    p = sub.add_parser("backup", help="Backup local config and Hermes state database"); p.add_argument("--label", default="workstation"); p.set_defaults(func=cmd_backup)
-    p = sub.add_parser("restore", help="Restore files from a backup manifest"); p.add_argument("manifest"); p.add_argument("--execute", action="store_true"); p.add_argument("-y", "--yes", action="store_true"); p.add_argument("--allowed-root", action="append", default=[], help="Authorized destination root (repeatable; required with --execute)"); p.set_defaults(func=cmd_restore)
+    backup = sub.add_parser("backup", help="Backup local config and Hermes state database")
+    backup.add_argument("--label", default="workstation")
+    backup.set_defaults(func=cmd_backup)
+    backup_sub = backup.add_subparsers(dest="backup_action")
+    verify = backup_sub.add_parser("verify", help="Read-only verify a backup manifest")
+    verify.add_argument("manifest")
+    verify.set_defaults(func=cmd_backup_verify)
+    p = sub.add_parser("restore", help="Restore files from a backup manifest"); p.add_argument("manifest"); p.add_argument("--plan", action="store_true", help="Validate and report restore actions without mutation"); p.add_argument("--execute", action="store_true"); p.add_argument("-y", "--yes", action="store_true"); p.add_argument("--allowed-root", action="append", default=[], help="Authorized destination root (repeatable; required with --execute)"); p.set_defaults(func=cmd_restore)
     p = sub.add_parser("hermes-maintain", help="Backup/checkpoint/optimize Hermes DB; explicit and disk-gated"); p.add_argument("--execute", action="store_true"); p.add_argument("-y", "--yes", action="store_true"); p.add_argument("--min-free-gb", type=float, default=15.0); p.set_defaults(func=cmd_hermes_maintain)
     sub.add_parser("android-cleanup-plan", help="Read-only Android SDK cleanup plan from Gradle requirements").set_defaults(func=cmd_android_plan)
     p = sub.add_parser("schedule", help="Preview or opt-in create daily health report schedule"); p.add_argument("--hour", type=int, default=9); p.add_argument("--create", action="store_true"); p.add_argument("-y", "--yes", action="store_true"); p.set_defaults(func=cmd_schedule)

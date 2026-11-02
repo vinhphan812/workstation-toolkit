@@ -7,9 +7,13 @@ A **cross-platform workstation operations toolkit** for Windows, Linux, and macO
 - Read-only commands are the default.
 - Mutating operations require an explicit flag such as `--fix`, `--prune`, or `--execute`.
 - Git worktree deletion refuses Git-registered worktrees.
+- Git worktree deletion also refuses paths with a confirmed operating-system lock.
+- The worktree audit never mutates the filesystem while probing, and reports lock state as `locked`, `unlocked`, or `unknown` rather than guessing. `unknown` means the platform offers no reliable read-only evidence (for example POSIX, where an open file can still be unlinked).
 - Git identity remediation only unsets known unsafe local identities, such as `hermes@agent.local`; it never writes a local identity.
 - Large Hermes SQLite databases are not integrity-scanned in the fast health check; the command reports that this work is deferred rather than blocking for minutes.
 - Configured project commands are **executable code**. `--execute` runs the configured command with the current user's privileges, exactly as if it had been typed into a terminal. Only the person running the toolkit can approve that.
+- Backup payloads are named so that same-named sources never share one payload file; every manifest entry records its own payload path and digest.
+- Backup manifests keep the same schema, so manifests written by earlier versions still restore.
 
 ## Requirements
 
@@ -95,8 +99,8 @@ python -m workstation git-identity
 # Remove only known-bad local identities, with explicit opt-in
 python -m workstation git-identity --fix
 
-# Audit Git worktrees; no deletion by default
-python -m workstation git-worktrees --dry-run
+# Audit Git worktrees; no deletion by default (read-only)
+python -m workstation git-worktrees
 
 # Docker inspection; no cleanup by default
 python -m workstation docker
@@ -111,10 +115,20 @@ python -m workstation docker --prune --images --volumes --yes
 # Hermes profile/state database health
 python -m workstation hermes
 
+# Create a versioned backup; verify all stored payload digests without mutation
+python -m workstation backup --label workstation
+python -m workstation backup verify D:/backups/<backup-id>/manifest.json
+
+# Preflight every restore entry and authorized path without mutation
+python -m workstation restore D:/backups/manifest.json --plan --allowed-root D:/projects
+
 # Restore a manifest only into explicitly authorized destination roots
 # Manifest backup directories must be trusted and not concurrently modified.
-# Source paths must be absolute native paths for the operating system running the restore.
-python -m workstation restore D:/backups/manifest.json --execute --yes --allowed-root D:/projects
+# Restore is POSIX-only: destination writes are bound to a directory descriptor
+# opened from the allowed root, so a swapped parent cannot redirect them. On
+# platforms without descriptor-relative operations (for example Windows) restore
+# refuses instead of falling back to path-based replacement.
+python -m workstation restore /srv/backups/manifest.json --execute --yes --allowed-root /srv/projects
 
 # Kanban is read-only: board health and archive candidates only
 python -m workstation kanban
@@ -240,3 +254,10 @@ uv run python -m compileall -q src
 ```
 
 Current tests cover disk inspection, Git identity classification, protected worktree deletion, SQLite quick integrity, process orphan evidence, and adapter interfaces.
+
+
+### Backup manifest compatibility and recovery
+
+New manifests use schema version 1 and record each source's size, modification time, and SHA-256. The verifier accepts legacy manifests without a version (treated as version 0), as well as version 1; unknown or malformed versions are rejected. A source that changes while being copied is marked failed and its incomplete payload is removed. `backup verify` is read-only and reports source-missing, failed, missing-payload, and digest-mismatch entries.
+
+Use `restore --plan` before execution. It validates the complete manifest, each payload digest, and every destination against one of the explicitly supplied `--allowed-root` paths; it creates no directories or files. For recovery, first verify the trusted backup, inspect the plan, then execute restore with `--execute --yes` and the same authorized roots. Keep backup directories trusted and do not modify them concurrently. Execution requires POSIX descriptor-relative destination operations; on other platforms `restore --execute` fails closed and `--plan` remains available for read-only preflight.

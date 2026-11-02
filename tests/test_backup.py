@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 from workstation.core.backup import backup_files
 
 def test_backup_files_copies_and_manifests(tmp_path, monkeypatch):
@@ -22,3 +23,365 @@ def test_backup_preflight_blocks_before_creating_destination(tmp_path, monkeypat
     with pytest.raises(RuntimeError, match='Insufficient backup space'):
         backup.backup_files('blocked', [str(source)])
     assert list((tmp_path / 'backups').glob('*')) == []
+
+
+def test_backup_permissions_are_owner_only_on_posix(tmp_path, monkeypatch):
+    import os
+    import stat
+    import workstation.core.backup as backup
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+    result = backup.backup_files("permissions", [str(source)])
+
+    if os.name != "nt":
+        backup_dir = Path(result["directory"])
+        assert stat.S_IMODE(backup.BACKUPS_DIR.stat().st_mode) == 0o700
+        assert stat.S_IMODE(backup_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(Path(result["files"][0]["backup"]).stat().st_mode) == 0o600
+        assert stat.S_IMODE(Path(result["manifest"]).stat().st_mode) == 0o600
+
+
+def test_backup_reports_the_permission_status_of_every_artifact(tmp_path, monkeypatch):
+    import workstation.core.backup as backup
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+    result = backup.backup_files("reported", [str(source)])
+
+    summary = result["permissions"]
+    assert summary["platform"] in {"posix", "windows"}
+    assert summary["enforced"] is True
+    assert summary["status"] in {"enforced", "preserved"}
+    # The root, the backup directory, the payload and the manifest.
+    assert len(summary["results"]) == 4
+
+
+def test_backup_manifest_records_the_permission_status(tmp_path, monkeypatch):
+    import json
+    import workstation.core.backup as backup
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+    result = backup.backup_files("manifest", [str(source)])
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    assert manifest["permissions"]["enforced"] is True
+    assert manifest["permissions"]["platform"] in {"posix", "windows"}
+
+
+def test_backup_manifest_covers_every_artifact_including_itself(tmp_path, monkeypatch):
+    import json
+    import workstation.core.backup as backup
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+    result = backup.backup_files("covered", [str(source)])
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    recorded = {entry["path"] for entry in manifest["permissions"]["results"]}
+    # The root, the backup directory, the payload and the manifest itself.
+    assert len(recorded) == 4
+    assert str(Path(result["manifest"])) in recorded
+    assert str(Path(result["files"][0]["backup"])) in recorded
+    # The manifest and the returned report agree on the outcome.
+    assert manifest["permissions"]["status"] == result["permissions"]["status"]
+    assert manifest["permissions"]["enforced"] == result["permissions"]["enforced"]
+
+
+def test_backup_removes_the_destination_when_the_manifest_cannot_be_restricted(tmp_path, monkeypatch):
+    import workstation.core.backup as backup
+    import workstation.core.permissions as permissions
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+
+    def boom(*_args, **_kwargs):
+        return permissions.PermissionResult(
+            permissions.STATUS_FAILED, permissions.platform_name(), "manifest",
+            detail="simulated failure",
+        )
+
+    monkeypatch.setattr(backup.permissions, "write_private_text", boom)
+    import pytest
+    with pytest.raises(RuntimeError, match="could not be restricted"):
+        backup.backup_files("manifest_failure", [str(source)])
+
+    assert list((tmp_path / "backups").glob("*")) == []
+
+
+def test_backup_removes_the_destination_when_the_manifest_rewrite_fails(tmp_path, monkeypatch):
+    # The manifest rewrite can now fail: the original mode could not be
+    # restored, so the outcome of the rewrite cannot be verified.  The
+    # backup must not keep a destination whose manifest is in that state.
+    import workstation.core.backup as backup
+    import workstation.core.permissions as permissions
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+
+    def boom(*_args, **_kwargs):
+        return permissions.PermissionResult(
+            permissions.STATUS_FAILED, permissions.platform_name(), "manifest",
+            detail="unable to restore original mode 0o400",
+        )
+
+    monkeypatch.setattr(backup.permissions, "rewrite_private_text", boom)
+    import pytest
+    with pytest.raises(RuntimeError, match="could not be restricted"):
+        backup.backup_files("rewrite_failure", [str(source)])
+
+    assert list((tmp_path / "backups").glob("*")) == []
+
+
+def test_backup_fails_closed_when_the_payload_security_descriptor_cannot_be_read(tmp_path, monkeypatch):
+    # The security descriptor of the payload cannot be read, so the
+    # owner-only DACL cannot be enforced and cannot be verified.  The
+    # backup fails closed and leaves no copy of the payload behind.
+    import os
+    import workstation.core.backup as backup
+    import workstation.core.permissions as permissions
+
+    if os.name != "nt":
+        return
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+
+    real_read_security = permissions._read_security
+
+    def unreadable_for_payload(path):
+        # Only the payload's descriptor is unreadable.  The root and the
+        # backup directory stay readable, so the failure is reached on the
+        # payload rather than on the directory.
+        if Path(path).name == "secret.txt":
+            return None, None
+        return real_read_security(path)
+
+    monkeypatch.setattr(permissions, "_read_security", unreadable_for_payload)
+    import pytest
+    with pytest.raises(RuntimeError, match="could not be restricted"):
+        backup.backup_files("unverifiable", [str(source)])
+
+    # The destination is removed, so no unprotected copy of the payload is
+    # left behind.
+    assert list((tmp_path / "backups").glob("*")) == []
+
+
+def test_backup_aborts_and_removes_the_destination_when_a_payload_cannot_be_restricted(tmp_path, monkeypatch):
+    import workstation.core.backup as backup
+    import workstation.core.permissions as permissions
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+
+    def boom(*_args, **_kwargs):
+        return permissions.PermissionResult(
+            permissions.STATUS_FAILED, permissions.platform_name(), "payload",
+            detail="chmod failed: simulated failure",
+        )
+
+    monkeypatch.setattr(backup, "_copy_private", boom)
+    import pytest
+    with pytest.raises(RuntimeError, match="could not be restricted"):
+        backup.backup_files("failing", [str(source)])
+
+    # The destination directory is removed, so no unprotected copy of the
+    # payload is left behind.
+    assert list((tmp_path / "backups").glob("*")) == []
+
+
+def test_backup_reports_an_unsupported_platform_without_claiming_protection(tmp_path, monkeypatch):
+    import shutil
+    import workstation.core.backup as backup
+    import workstation.core.permissions as permissions
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+
+    def unsupported(source_path, target_path):
+        # The payload is copied, but the filesystem cannot express the
+        # owner-only policy for it.
+        shutil.copy2(source_path, target_path)
+        return permissions.PermissionResult(
+            permissions.STATUS_UNSUPPORTED, permissions.platform_name(), str(target_path),
+            detail="this filesystem does not support POSIX permissions",
+        )
+
+    monkeypatch.setattr(backup, "_copy_private", unsupported)
+    result = backup.backup_files("unsupported", [str(source)])
+
+    summary = result["permissions"]
+    assert summary["status"] == permissions.STATUS_UNSUPPORTED
+    assert summary["enforced"] is False
+
+
+def test_backup_restricts_the_backup_root_itself(tmp_path, monkeypatch):
+    import os
+    import stat
+    import workstation.core.backup as backup
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+    backup.backup_files("root", [str(source)])
+
+    if os.name != "nt":
+        assert stat.S_IMODE(backup.BACKUPS_DIR.stat().st_mode) == 0o700
+
+
+def test_backup_payload_is_not_readable_by_other_users(tmp_path, monkeypatch):
+    import os
+    import stat
+    import workstation.core.backup as backup
+
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "backups")
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+    # The source itself is world readable; the copy must not inherit that.
+    source.chmod(0o644)
+    result = backup.backup_files("payload", [str(source)])
+
+    if os.name != "nt":
+        copied = Path(result["files"][0]["backup"])
+        assert stat.S_IMODE(copied.stat().st_mode) == 0o600
+
+
+def test_backup_does_not_widen_a_stricter_existing_backup_root(tmp_path, monkeypatch):
+    import os
+    import stat
+    import workstation.core.backup as backup
+
+    if os.name == "nt":
+        return
+
+    root = tmp_path / "backups"
+    root.mkdir(mode=0o500)
+    monkeypatch.setattr(backup, "BACKUPS_DIR", root)
+    source = tmp_path / "secret.txt"
+    source.write_text("sensitive")
+    try:
+        result = backup.backup_files("strict", [str(source)])
+    except OSError:
+        # A read-only root cannot receive the backup; that is reported by
+        # the operating system, not silently worked around.
+        return
+    assert stat.S_IMODE(root.stat().st_mode) == 0o500
+    assert Path(result["manifest"]).is_file()
+
+
+def test_backup_manifest_version_and_read_only_verify(tmp_path, monkeypatch):
+    import json
+    import workstation.core.backup as backup
+    monkeypatch.setattr(backup, 'BACKUPS_DIR', tmp_path / 'backups')
+    source = tmp_path / 'source.bin'; source.write_bytes(b'large' * 200000)
+    result = backup.backup_files('versioned', [str(source)])
+    manifest = json.loads(Path(result['manifest']).read_text())
+    assert manifest['version'] == backup.MANIFEST_VERSION
+    payload = Path(manifest['files'][0]['backup'])
+    before = payload.stat().st_mtime_ns
+    assert backup.verify_backup(result['manifest'])['ok']
+    assert payload.stat().st_mtime_ns == before
+    payload.write_bytes(b'corrupt')
+    report = backup.verify_backup(result['manifest'])
+    assert not report['ok'] and report['failed'][0]['reason'] == 'checksum mismatch'
+
+
+def test_verify_accepts_legacy_manifest_and_reports_missing(tmp_path):
+    import json
+    from workstation.core.backup import verify_backup
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text(json.dumps({'files': [{'source': '/gone', 'status': 'missing'}]}))
+    report = verify_backup(str(manifest))
+    assert not report['ok'] and report['failed'][0]['reason'] == 'source missing at backup time'
+
+
+def test_manifest_rejects_unsupported_version(tmp_path):
+    import json
+    from workstation.core.backup import verify_backup
+    manifest = tmp_path / 'manifest.json'; manifest.write_text(json.dumps({'version': 99, 'files': []}))
+    import pytest
+    with pytest.raises(ValueError, match='Unsupported backup manifest version'):
+        verify_backup(str(manifest))
+
+
+def test_backup_gives_same_named_sources_distinct_payloads(tmp_path, monkeypatch):
+    import json
+    import workstation.core.backup as backup
+    monkeypatch.setattr(backup, 'BACKUPS_DIR', tmp_path / 'backups')
+    left = tmp_path / 'left' / 'same.txt'
+    right = tmp_path / 'right' / 'same.txt'
+    left.parent.mkdir(); right.parent.mkdir()
+    left.write_bytes(b'left bytes'); right.write_bytes(b'right bytes')
+    result = backup.backup_files('collision', [str(left), str(right)])
+    entries = result['files']
+    assert len(entries) == 2
+    payloads = [Path(entry['backup']) for entry in entries]
+    assert len({str(payload) for payload in payloads}) == 2
+    assert payloads[0].read_bytes() == b'left bytes'
+    assert payloads[1].read_bytes() == b'right bytes'
+    for entry, source in zip(entries, (left, right)):
+        payload = Path(entry['backup'])
+        assert entry['sha256'] == hashlib.sha256(payload.read_bytes()).hexdigest()
+        assert entry['sha256'] == hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest = json.loads(Path(result['manifest']).read_text(encoding='utf-8'))
+    assert [entry['backup'] for entry in manifest['files']] == [str(payload) for payload in payloads]
+
+
+def test_backup_payload_names_avoid_case_insensitive_collisions(tmp_path, monkeypatch):
+    import workstation.core.backup as backup
+    monkeypatch.setattr(backup, 'BACKUPS_DIR', tmp_path / 'backups')
+    upper = tmp_path / 'upper' / 'Same.txt'
+    lower = tmp_path / 'lower' / 'same.txt'
+    upper.parent.mkdir(); lower.parent.mkdir()
+    upper.write_bytes(b'upper bytes'); lower.write_bytes(b'lower bytes')
+    result = backup.backup_files('case', [str(upper), str(lower)])
+    payloads = [Path(entry['backup']) for entry in result['files']]
+    assert len({payload.name.casefold() for payload in payloads}) == 2
+    assert sorted(payload.read_bytes() for payload in payloads) == [b'lower bytes', b'upper bytes']
+
+
+def test_backup_payload_variant_never_shadows_another_source_name(tmp_path, monkeypatch):
+    import workstation.core.backup as backup
+    monkeypatch.setattr(backup, 'BACKUPS_DIR', tmp_path / 'backups')
+    first = tmp_path / 'a' / 'same.txt'
+    second = tmp_path / 'b' / 'same.txt'
+    third = tmp_path / 'c' / 'same~1.txt'
+    for path in (first, second, third):
+        path.parent.mkdir()
+    first.write_bytes(b'first'); second.write_bytes(b'second'); third.write_bytes(b'third')
+    result = backup.backup_files('variant', [str(first), str(second), str(third)])
+    payloads = [Path(entry['backup']) for entry in result['files']]
+    assert len({payload.name.casefold() for payload in payloads}) == 3
+    assert sorted(payload.read_bytes() for payload in payloads) == [b'first', b'second', b'third']
+
+
+def test_backup_keeps_unique_payload_name_unchanged(tmp_path, monkeypatch):
+    import workstation.core.backup as backup
+    monkeypatch.setattr(backup, 'BACKUPS_DIR', tmp_path / 'backups')
+    source = tmp_path / 'state.db'
+    source.write_bytes(b'state')
+    result = backup.backup_files('single', [str(source)])
+    assert Path(result['files'][0]['backup']).name == 'state.db'
+
+
+def test_backup_payload_never_overwrites_the_manifest(tmp_path, monkeypatch):
+    import json
+    import workstation.core.backup as backup
+    monkeypatch.setattr(backup, 'BACKUPS_DIR', tmp_path / 'backups')
+    source = tmp_path / 'manifest.json'
+    source.write_bytes(b'payload bytes')
+    result = backup.backup_files('named', [str(source)])
+    payload = Path(result['files'][0]['backup'])
+    assert payload.name != 'manifest.json'
+    assert payload.read_bytes() == b'payload bytes'
+    assert json.loads(Path(result['manifest']).read_text(encoding='utf-8'))['files'][0]['backup'] == str(payload)
