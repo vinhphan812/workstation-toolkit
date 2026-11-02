@@ -293,7 +293,8 @@ def hermes_db_maintenance(execute: bool = False, yes: bool = False, min_free_gb:
         result['checkpoint'] = list(conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone())
         conn.close()
     except Exception as exc:
-        result.update({'ok': False, 'error': f'SQLite preflight/checkpoint failed: {exc}'})
+        result.update({'ok': False, 'error': f'SQLite preflight/checkpoint failed: {exc}',
+                       'failures': [{'stage': 'preflight', 'message': f'SQLite preflight/checkpoint failed: {exc}'}]})
         return result
     failures = []
     if result['quick_check_before'] != 'ok':
@@ -311,7 +312,8 @@ def hermes_db_maintenance(execute: bool = False, yes: bool = False, min_free_gb:
         if process.returncode != 0:
             failures.append({'stage': 'optimize_exit', 'message': f'Optimizer exited with status {process.returncode}'})
     except Exception as exc:
-        result.update({'ok': False, 'error': f'optimize failed: {exc}'})
+        result.update({'ok': False, 'error': f'optimize failed: {exc}',
+                       'failures': [{'stage': 'optimize', 'message': f'optimize failed: {exc}'}]})
         return result
     try:
         conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=10)
@@ -321,7 +323,10 @@ def hermes_db_maintenance(execute: bool = False, yes: bool = False, min_free_gb:
         if result['quick_check_after'] != 'ok':
             failures.append({'stage': 'quick_check_after', 'message': f"Expected 'ok', got {result['quick_check_after']!r}"})
     except Exception as exc:
-        result.update({'ok': False, 'error': f'post-check failed: {exc}'})
+        result.update({'error': f'post-check failed: {exc}'})
+        failures.append({'stage': 'post_check', 'message': f'post-check failed: {exc}'})
+    # The post-check exception is recorded as a failure above, so the report
+    # cannot claim success after a stage that was never verified.
     result.update({'ok': not failures, 'failures': failures})
     return result
 
