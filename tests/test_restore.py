@@ -11,6 +11,8 @@ def _write_manifest(path, entries):
 
 
 def test_restore_skips_checksum_mismatch(tmp_path):
+    if not maintenance._descriptor_destination_supported():
+        pytest.skip('restore refuses path-based destination writes on this platform')
     target = tmp_path / 'target.txt'
     target.write_text('original destination')
     backup = tmp_path / 'backup.txt'
@@ -68,37 +70,28 @@ def test_restore_preserves_corrupt_stage_evidence_and_destination(tmp_path, monk
         'sha256': _sha256(backup),
     }])
     import os
+    if not maintenance._descriptor_destination_supported():
+        pytest.skip('staged-file evidence path requires descriptor-relative destination ops')
     corrupted = False
-    if os.name == 'posix' and hasattr(os, 'O_NOFOLLOW') and os.open in os.supports_dir_fd:
-        real_open = maintenance.os.open
-        def corrupt_stage_on_reread(file, flags, *args, **kwargs):
-            nonlocal corrupted
-            if (
-                not corrupted
-                and isinstance(file, str)
-                and '.restore-' in file
-                and kwargs.get('dir_fd') is not None
-                and flags & os.O_ACCMODE == os.O_RDONLY
-                and not flags & (os.O_WRONLY | os.O_CREAT)
-            ):
-                corrupted = True
-                fd = real_open(file, os.O_WRONLY | os.O_TRUNC, dir_fd=kwargs['dir_fd'])
-                try:
-                    os.write(fd, b'corrupted staged bytes')
-                finally:
-                    os.close(fd)
-            return real_open(file, flags, *args, **kwargs)
-        monkeypatch.setattr(maintenance.os, 'open', corrupt_stage_on_reread)
-    else:
-        import builtins
-        real_open = builtins.open
-        def corrupt_stage_on_reread(file, mode='r', *args, **kwargs):
-            nonlocal corrupted
-            if not corrupted and isinstance(file, (str, Path)) and '.restore-' in str(file) and mode == 'rb':
-                corrupted = True
-                Path(file).write_bytes(b'corrupted staged bytes')
-            return real_open(file, mode, *args, **kwargs)
-        monkeypatch.setattr(builtins, 'open', corrupt_stage_on_reread)
+    real_open = maintenance.os.open
+    def corrupt_stage_on_reread(file, flags, *args, **kwargs):
+        nonlocal corrupted
+        if (
+            not corrupted
+            and isinstance(file, str)
+            and '.restore-' in file
+            and kwargs.get('dir_fd') is not None
+            and flags & os.O_ACCMODE == os.O_RDONLY
+            and not flags & (os.O_WRONLY | os.O_CREAT)
+        ):
+            corrupted = True
+            fd = real_open(file, os.O_WRONLY | os.O_TRUNC, dir_fd=kwargs['dir_fd'])
+            try:
+                os.write(fd, b'corrupted staged bytes')
+            finally:
+                os.close(fd)
+        return real_open(file, flags, *args, **kwargs)
+    monkeypatch.setattr(maintenance.os, 'open', corrupt_stage_on_reread)
     report = maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert corrupted, 'test must corrupt the staged file before its verification read'
     assert not report['restored']
@@ -206,6 +199,8 @@ def test_restore_rejects_non_absolute_destination(tmp_path):
 
 
 def test_restore_refuses_parent_symlink_swap_before_replace(tmp_path, monkeypatch):
+    if not maintenance._descriptor_destination_supported():
+        pytest.skip('descriptor-relative destination traversal is unavailable on this platform')
     root = tmp_path / 'allowed'
     parent = root / 'nested'
     root.mkdir()
@@ -236,7 +231,65 @@ def test_restore_refuses_parent_symlink_swap_before_replace(tmp_path, monkeypatc
     assert (root / 'moved' / 'victim.txt').read_text() == 'original'
 
 
+def test_restore_fails_closed_without_descriptor_relative_destination_ops(tmp_path, monkeypatch):
+    """A1 policy: no path-based destination replacement on non-POSIX platforms.
+
+    Windows cannot bind a staged file's replacement to an already-opened
+    parent directory, so a parent symlink/junction swap between validation and
+    the write cannot be detected. The accepted policy is to refuse rather than
+    accept the race, and to leave the destination untouched.
+    """
+    root = tmp_path / 'allowed'
+    root.mkdir()
+    nested = root / 'nested'
+    nested.mkdir()
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    victim = nested / 'victim.txt'
+    victim.write_text('original')
+    outside_victim = outside / 'victim.txt'
+    backup = tmp_path / 'backup.txt'
+    backup.write_text('trusted replacement')
+    manifest = _write_manifest(tmp_path / 'manifest.json', [{
+        'source': str(victim), 'backup': str(backup), 'status': 'backed_up',
+        'sha256': _sha256(backup),
+    }])
+    monkeypatch.setattr(maintenance, '_descriptor_destination_supported', lambda: False)
+
+    with pytest.raises(ValueError, match='POSIX descriptor-relative destination operations'):
+        maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(root)])
+
+    assert victim.read_text() == 'original'
+    assert not outside_victim.exists()
+    assert backup.read_text() == 'trusted replacement'
+    assert not list(nested.glob('.victim.txt.restore-*'))
+    assert not list(root.glob('.victim.txt.restore-*'))
+
+
+def test_cmd_restore_reports_fail_closed_platform_refusal(tmp_path, monkeypatch, capsys):
+    import argparse
+    import workstation.cli as cli
+    root = tmp_path / 'allowed'
+    root.mkdir()
+    victim = root / 'victim.txt'
+    victim.write_text('original')
+    backup = tmp_path / 'backup.txt'
+    backup.write_text('trusted replacement')
+    manifest = _write_manifest(tmp_path / 'manifest.json', [{
+        'source': str(victim), 'backup': str(backup), 'status': 'backed_up',
+        'sha256': _sha256(backup),
+    }])
+    monkeypatch.setattr(maintenance, '_descriptor_destination_supported', lambda: False)
+    args = argparse.Namespace(manifest=str(manifest), execute=True, yes=True, allowed_root=[str(root)], json=False, save_report=None)
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_restore(args)
+    assert 'POSIX descriptor-relative destination operations' in str(exc.value.code)
+    assert victim.read_text() == 'original'
+
+
 def test_restore_accepts_backup_files_manifest(tmp_path, monkeypatch):
+    if not maintenance._descriptor_destination_supported():
+        pytest.skip('restore refuses path-based destination writes on this platform')
     import workstation.core.backup as backup_module
     monkeypatch.setattr(backup_module, 'BACKUPS_DIR', tmp_path / 'backups')
     source = tmp_path / 'source.db'

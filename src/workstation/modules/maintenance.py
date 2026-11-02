@@ -1,6 +1,6 @@
 """Backup/restore and Hermes SQLite maintenance, all explicit and guarded."""
 from __future__ import annotations
-import hashlib, json, os, shutil, sqlite3, stat, subprocess, tempfile
+import hashlib, inspect, json, os, shutil, sqlite3, stat, subprocess, tempfile
 from pathlib import Path
 from workstation.config import TOOLKIT_ROOT, get_hermes_profile, get_hermes_home
 from workstation.core.backup import backup_files
@@ -24,6 +24,12 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
     Generated manifests retain their original absolute source paths; callers
     must explicitly authorize those roots. Backup payloads stay in the manifest
     directory and are read from a single no-follow descriptor into staging.
+
+    Destination mutations are bound to a directory descriptor opened by
+    traversing from the authorized root, so a concurrently swapped parent
+    cannot redirect the write. Platforms without descriptor-relative
+    operations (for example Windows) are refused rather than falling back to
+    path-based replacement, which cannot be made race-safe.
     """
     require_execute(execute, yes, 'restore')
     if not allowed_roots:
@@ -69,6 +75,11 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
         if not isinstance(expected, str) or len(expected) != 64 or any(c not in '0123456789abcdefABCDEF' for c in expected):
             raise ValueError(f"Invalid backup manifest entry {index}: invalid sha256")
         validated.append((entry, source, (backup, expected)))
+
+    # Manifest validation above is read-only. Refuse before any destination
+    # mutation when the platform cannot bind writes to an opened directory.
+    if any(item[2] is not None for item in validated) and not _descriptor_destination_supported():
+        raise ValueError('restore requires POSIX descriptor-relative destination operations; refusing path-based replacement on this platform')
 
     for entry, source, payload in validated:
         if payload is None:
@@ -123,10 +134,7 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
             os.close(fd)
         try:
             staged_hash = hashlib.sha256()
-            if destination_fd is None:
-                staged_file = open(temp_name, 'rb')
-            else:
-                staged_file = os.fdopen(os.open(temp_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=destination_fd), 'rb')
+            staged_file = os.fdopen(os.open(temp_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=destination_fd), 'rb')
             with staged_file as staged:
                 for chunk in iter(lambda: staged.read(1024 * 1024), b''):
                     staged_hash.update(chunk)
@@ -134,45 +142,50 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
                 failed.append({**entry, 'reason': 'post-copy checksum mismatch', 'expected_sha256': expected, 'actual_sha256': staged_hash.hexdigest(), 'evidence_path': temp_name, 'source_preserved': True, 'backup_preserved': True})
                 temp_name = None
                 continue
-            if destination_fd is not None:
-                os.replace(temp_name, leaf_name, src_dir_fd=destination_fd, dst_dir_fd=destination_fd)
-            else:
-                # Non-POSIX fallback: policy requires destination trees to be
-                # trusted and not concurrently writable during restore.
-                parent = source.parent.resolve(strict=True)
-                if not any(_is_relative_to(parent, root) for root in roots):
-                    failed.append({**entry, 'reason': 'destination parent changed outside allowed roots', 'source_preserved': True, 'backup_preserved': True})
-                    temp_name = None
-                    continue
-                os.replace(temp_name, source)
+            os.replace(temp_name, leaf_name, src_dir_fd=destination_fd, dst_dir_fd=destination_fd)
             temp_name = None
             restored.append(str(source))
         finally:
             if temp_name is not None:
                 try:
-                    if destination_fd is None:
-                        os.unlink(temp_name)
-                    else:
-                        os.unlink(temp_name, dir_fd=destination_fd)
+                    os.unlink(temp_name, dir_fd=destination_fd)
                 except (FileNotFoundError, OSError):
                     pass
-            if destination_fd is not None:
-                os.close(destination_fd)
+            os.close(destination_fd)
     return {'ok': not failed, 'restored': restored, 'skipped': skipped, 'failed': failed}
+
+
+def _detect_descriptor_destination_support() -> bool:
+    """Detect whether destination writes can be bound to an opened directory.
+
+    `os.replace` is not listed in `os.supports_dir_fd` on Linux even though it
+    accepts `src_dir_fd`/`dst_dir_fd`, so its signature is inspected directly.
+    Detection runs at import time so that tests which temporarily patch `os`
+    helpers cannot change the recorded platform capability.
+    """
+    if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW'):
+        return False
+    if not (os.open in os.supports_dir_fd and os.unlink in os.supports_dir_fd and os.mkdir in os.supports_dir_fd):
+        return False
+    try:
+        parameters = inspect.signature(os.replace).parameters
+    except (TypeError, ValueError):
+        return False
+    return 'src_dir_fd' in parameters and 'dst_dir_fd' in parameters
+
+
+_DESCRIPTOR_DESTINATION_SUPPORTED = _detect_descriptor_destination_support()
+
+
+def _descriptor_destination_supported() -> bool:
+    """True when this platform can bind destination writes to an open directory."""
+    return _DESCRIPTOR_DESTINATION_SUPPORTED
 
 
 def _open_destination_parent(source: Path, roots: list[Path]):
     """Create/open the parent without following swapped path components (POSIX)."""
-    if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW') or not os.supports_dir_fd:
-        parent = source.parent.resolve(strict=False)
-        if not any(_is_relative_to(parent, root) for root in roots):
-            raise ValueError('destination parent changed outside allowed roots')
-        source.parent.mkdir(parents=True, exist_ok=True)
-        parent = source.parent.resolve(strict=True)
-        if not any(_is_relative_to(parent, root) for root in roots):
-            raise ValueError('destination parent changed outside allowed roots')
-        fd, name = tempfile.mkstemp(prefix=f'.{source.name}.restore-', dir=parent)
-        return fd, name, None, source.name
+    if not _descriptor_destination_supported():
+        raise OSError('descriptor-relative destination operations are unavailable on this platform')
 
     root = next((r for r in roots if _is_relative_to(source, r)), None)
     if root is None:
