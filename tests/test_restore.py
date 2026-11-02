@@ -11,6 +11,8 @@ def _write_manifest(path, entries):
 
 
 def test_restore_skips_checksum_mismatch(tmp_path):
+    if not maintenance._descriptor_destination_supported():
+        pytest.skip('restore refuses path-based destination writes on this platform')
     target = tmp_path / 'target.txt'
     target.write_text('original destination')
     backup = tmp_path / 'backup.txt'
@@ -51,7 +53,7 @@ def test_cmd_restore_exits_nonzero_when_restore_report_fails(monkeypatch, capsys
     import workstation.cli as cli
     import workstation.modules.maintenance as maintenance_module
     monkeypatch.setattr(maintenance_module, 'restore_backup', lambda manifest_path, **kwargs: {'ok': False, 'restored': [], 'skipped': [], 'failed': [{'reason': 'checksum mismatch'}]})
-    args = argparse.Namespace(manifest='manifest.json', execute=True, yes=True, allowed_root=['D:/allowed'], json=False, save_report=None)
+    args = argparse.Namespace(manifest='manifest.json', execute=True, yes=True, allowed_root=['D:/allowed'], plan=False, json=False, save_report=None)
     with pytest.raises(SystemExit) as exc:
         cli.cmd_restore(args)
     assert exc.value.code == 1
@@ -59,7 +61,7 @@ def test_cmd_restore_exits_nonzero_when_restore_report_fails(monkeypatch, capsys
 
 
 def test_restore_preserves_corrupt_stage_evidence_and_destination(tmp_path, monkeypatch):
-    import builtins
+    import os
     target = tmp_path / 'target.txt'
     target.write_text('original')
     backup = tmp_path / 'backup.txt'
@@ -68,16 +70,30 @@ def test_restore_preserves_corrupt_stage_evidence_and_destination(tmp_path, monk
         'source': str(target), 'backup': str(backup), 'status': 'backed_up',
         'sha256': _sha256(backup),
     }])
-    real_open = builtins.open
+    if not maintenance._descriptor_destination_supported():
+        pytest.skip('staged-file evidence path requires descriptor-relative destination ops')
+    real_open = maintenance.os.open
     corrupted = False
-    def corrupt_stage_on_reread(file, mode='r', *args, **kwargs):
+    def corrupt_stage_on_reread(file, flags, *args, **kwargs):
         nonlocal corrupted
-        if not corrupted and isinstance(file, (str, Path)) and '.restore-' in str(file) and mode == 'rb':
+        if (
+            not corrupted
+            and isinstance(file, str)
+            and '.restore-' in file
+            and kwargs.get('dir_fd') is not None
+            and flags & os.O_ACCMODE == os.O_RDONLY
+            and not flags & (os.O_WRONLY | os.O_CREAT)
+        ):
             corrupted = True
-            Path(file).write_bytes(b'corrupted staged bytes')
-        return real_open(file, mode, *args, **kwargs)
-    monkeypatch.setattr(builtins, 'open', corrupt_stage_on_reread)
+            fd = real_open(file, os.O_WRONLY | os.O_TRUNC, dir_fd=kwargs['dir_fd'])
+            try:
+                os.write(fd, b'corrupted staged bytes')
+            finally:
+                os.close(fd)
+        return real_open(file, flags, *args, **kwargs)
+    monkeypatch.setattr(maintenance.os, 'open', corrupt_stage_on_reread)
     report = maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(tmp_path)])
+    assert corrupted, 'test must corrupt the staged file before its verification read'
     assert not report['restored']
     mismatch = report['failed'][0]
     assert report['ok'] is False
@@ -182,6 +198,8 @@ def test_restore_rejects_non_absolute_destination(tmp_path):
 
 
 def test_restore_accepts_backup_files_manifest(tmp_path, monkeypatch):
+    if not maintenance._descriptor_destination_supported():
+        pytest.skip('restore refuses path-based destination writes on this platform')
     import workstation.core.backup as backup_module
     monkeypatch.setattr(backup_module, 'BACKUPS_DIR', tmp_path / 'backups')
     source = tmp_path / 'source.db'
@@ -191,3 +209,113 @@ def test_restore_accepts_backup_files_manifest(tmp_path, monkeypatch):
     report = maintenance.restore_backup(created['manifest'], execute=True, yes=True, allowed_roots=[str(tmp_path)])
     assert report['restored'] == [str(source)]
     assert source.read_text() == 'backup data'
+
+
+def test_plan_restore_validates_authorization_and_has_zero_mutation(tmp_path):
+    root = tmp_path / 'allowed'; root.mkdir()
+    target = root / 'new' / 'target.txt'
+    payload = tmp_path / 'payload'; payload.write_text('planned')
+    manifest = _write_manifest(tmp_path / 'manifest.json', [{'source': str(target), 'backup': str(payload), 'status': 'backed_up', 'sha256': _sha256(payload)}])
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob('*'))
+    report = maintenance.plan_restore(str(manifest), [str(root)])
+    after = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob('*'))
+    assert report['ok'] and report['dry_run'] and report['actions'][0]['action'] == 'restore'
+    assert before == after and not target.parent.exists()
+
+
+def test_restore_fails_closed_without_descriptor_relative_destination_ops(tmp_path, monkeypatch):
+    """A1 policy: no path-based destination replacement on non-POSIX platforms."""
+    root = tmp_path / 'allowed'
+    root.mkdir()
+    nested = root / 'nested'
+    nested.mkdir()
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    victim = nested / 'victim.txt'
+    victim.write_text('original')
+    backup = tmp_path / 'backup.txt'
+    backup.write_text('trusted replacement')
+    manifest = _write_manifest(tmp_path / 'manifest.json', [{
+        'source': str(victim), 'backup': str(backup), 'status': 'backed_up',
+        'sha256': _sha256(backup),
+    }])
+    monkeypatch.setattr(maintenance, '_descriptor_destination_supported', lambda: False)
+
+    with pytest.raises(ValueError, match='POSIX descriptor-relative destination operations'):
+        maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(root)])
+
+    assert victim.read_text() == 'original'
+    assert not (outside / 'victim.txt').exists()
+    assert backup.read_text() == 'trusted replacement'
+    assert not list(nested.glob('.victim.txt.restore-*'))
+
+
+def test_cmd_restore_reports_fail_closed_platform_refusal(tmp_path, monkeypatch):
+    import argparse
+    import workstation.cli as cli
+    root = tmp_path / 'allowed'
+    root.mkdir()
+    victim = root / 'victim.txt'
+    victim.write_text('original')
+    backup = tmp_path / 'backup.txt'
+    backup.write_text('trusted replacement')
+    manifest = _write_manifest(tmp_path / 'manifest.json', [{
+        'source': str(victim), 'backup': str(backup), 'status': 'backed_up',
+        'sha256': _sha256(backup),
+    }])
+    monkeypatch.setattr(maintenance, '_descriptor_destination_supported', lambda: False)
+    args = argparse.Namespace(manifest=str(manifest), execute=True, yes=True, allowed_root=[str(root)], plan=False, json=False, save_report=None)
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_restore(args)
+    assert 'POSIX descriptor-relative destination operations' in str(exc.value.code)
+    assert victim.read_text() == 'original'
+
+
+def test_restore_refuses_parent_symlink_swap_before_replace(tmp_path, monkeypatch):
+    """A1 regression: swap the parent after validation, before the replace."""
+    if not maintenance._descriptor_destination_supported():
+        pytest.skip('descriptor-relative destination traversal is unavailable on this platform')
+    root = tmp_path / 'allowed'
+    parent = root / 'nested'
+    root.mkdir()
+    parent.mkdir()
+    victim = parent / 'victim.txt'
+    victim.write_text('original')
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    outside_victim = outside / 'victim.txt'
+    outside_victim.write_text('outside sentinel')
+    backup = tmp_path / 'backup.txt'
+    backup.write_text('trusted replacement')
+    manifest = _write_manifest(tmp_path / 'manifest.json', [{
+        'source': str(victim), 'backup': str(backup), 'status': 'backed_up',
+        'sha256': _sha256(backup),
+    }])
+    real_open_parent = maintenance._open_destination_parent
+    swapped = False
+    def swap_then_open(source, roots):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            parent.rename(root / 'moved')
+            try:
+                parent.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                pytest.skip('directory symlinks unavailable')
+        return real_open_parent(source, roots)
+    monkeypatch.setattr(maintenance, '_open_destination_parent', swap_then_open)
+    report = maintenance.restore_backup(str(manifest), execute=True, yes=True, allowed_roots=[str(root)])
+    assert swapped, 'test must swap the destination parent before the replace'
+    assert not report['restored']
+    assert report['failed'][0]['reason'].startswith('destination parent unavailable:')
+    assert outside_victim.read_text() == 'outside sentinel'
+    assert (root / 'moved' / 'victim.txt').read_text() == 'original'
+
+def test_plan_restore_rejects_later_unauthorized_entry_without_mutation(tmp_path):
+    root = tmp_path / 'allowed'; root.mkdir()
+    payload = tmp_path / 'payload'; payload.write_text('data')
+    entries = [{'source': str(root / 'ok'), 'backup': str(payload), 'status': 'backed_up', 'sha256': _sha256(payload)}, {'source': str(tmp_path / 'outside'), 'backup': str(payload), 'status': 'backed_up', 'sha256': _sha256(payload)}]
+    manifest = _write_manifest(tmp_path / 'manifest.json', entries)
+    with pytest.raises(ValueError, match='outside allowed roots'):
+        maintenance.plan_restore(str(manifest), [str(root)])
+    assert not (root / 'ok').exists() and not (tmp_path / 'outside').exists()
