@@ -10,6 +10,23 @@ from workstation.core.worktree import (
     delete_worktree,
 )
 
+
+def test_git_worktrees_command_is_read_only_by_default(tmp_path, monkeypatch, capsys):
+    import workstation.cli as cli
+    import workstation.core.worktree as worktree
+
+    monkeypatch.setattr(cli, "load_repos", lambda: [str(tmp_path)])
+    monkeypatch.setattr(worktree, "audit_all_worktrees", lambda _repos: {
+        "orphaned": [], "known": [], "locked": [], "errors": {},
+        "total_orphaned_size_mb": 0,
+    })
+    deleted = []
+    monkeypatch.setattr(worktree, "delete_orphaned", lambda *a, **k: deleted.append(True))
+    args = cli.build_parser().parse_args(["git-worktrees"])
+    args.func(args)
+    assert deleted == []
+    assert "Worktree Audit" in capsys.readouterr().out
+
 def test_never_delete_known_worktree(tmp_path):
     d = tmp_path / "known"
     d.mkdir()

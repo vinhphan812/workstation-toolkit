@@ -99,7 +99,7 @@ python -m workstation git-identity
 # Remove only known-bad local identities, with explicit opt-in
 python -m workstation git-identity --fix
 
-# Audit Git worktrees; no deletion by default (read-only)
+# Git worktree audit; no deletion by default (read-only plan)
 python -m workstation git-worktrees
 
 # Docker inspection; no cleanup by default
