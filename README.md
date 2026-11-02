@@ -112,8 +112,11 @@ python -m workstation hermes
 
 # Restore a manifest only into explicitly authorized destination roots
 # Manifest backup directories must be trusted and not concurrently modified.
-# Source paths must be absolute native paths for the operating system running the restore.
-python -m workstation restore D:/backups/manifest.json --execute --yes --allowed-root D:/projects
+# Restore is POSIX-only: destination writes are bound to a directory descriptor
+# opened from the allowed root, so a swapped parent cannot redirect them. On
+# platforms without descriptor-relative operations (for example Windows) restore
+# refuses instead of falling back to path-based replacement.
+python -m workstation restore /srv/backups/manifest.json --execute --yes --allowed-root /srv/projects
 
 # Kanban is read-only: board health and archive candidates only
 python -m workstation kanban
