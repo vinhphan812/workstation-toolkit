@@ -1,17 +1,18 @@
-# Project Manifests
-# Add projects to validate/clean via workstation validate <name>
+# Project manifest-shaped example (illustrative only).
+# Loaders support JSON only; use config/projects.json. This file is not read or
+# merged by the toolkit.
 
-[[projects]]
-name = "example"
-path = "D:/projects/example"
-type = "node-typescript"
-validate = ["npm run typecheck", "npm test"]
-clean = ["npm run clean"]
+# [[projects]]
+# name = "example"
+# path = "D:/projects/example"
+# type = "node-typescript"
+# validate = ["npm run typecheck", "npm test"]
+# clean = ["npm run clean"]
 
-[[projects]]
-name = "mcp-java-sdk"
-path = "D:/android/mcp-java-sdk"
-type = "gradle-java"
-java_home = "C:/Java/jdk-17.0.5"
-validate = ["./gradlew.bat test"]
-clean = ["./gradlew.bat clean"]
+# [[projects]]
+# name = "mcp-java-sdk"
+# path = "D:/android/mcp-java-sdk"
+# type = "gradle-java"
+# java_home = "C:/Java/jdk-17.0.5"
+# validate = ["./gradlew.bat test"]
+# clean = ["./gradlew.bat clean"]
