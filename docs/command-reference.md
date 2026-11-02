@@ -12,6 +12,27 @@ All commands accept the two global flags:
 | `--json` | Also print the machine-readable result to stdout |
 | `--save-report` | Write timestamped JSON and Markdown reports under `reports/` |
 
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | The command completed and the outcome it reports is a success |
+| `1` | The command completed but the outcome it reports is a failure |
+| `2` | The arguments were rejected by the argument parser |
+
+A non-zero exit code always corresponds to a stated failure, never to a
+warning. A command that reports `"ok": true` exits `0`; a command that
+reports `"ok": false` exits `1`. A diagnostic command that finds a problem
+therefore exits `1` even though it ran to completion.
+
+An error that prevents a command from running at all is reported as a single
+line on standard error, not as a Python traceback:
+
+```bash
+python -m workstation backup verify /no/such/manifest.json
+# Backup verification failed: [Errno 2] The system cannot find the file specified: '/no/such/manifest.json'
+```
+
 ---
 
 ## Read-only commands
@@ -191,6 +212,10 @@ python -m workstation forecast
 ### `kanban`
 
 Kanban board health. Without `--archive-plan` this is read-only.
+
+The report carries an explicit `ok` key. It is `true` only when every board
+could be inspected; a board that cannot be opened is listed in
+`unreadable_boards` and makes the command exit `1`.
 
 | Flag | Default | Effect |
 |---|---|---|

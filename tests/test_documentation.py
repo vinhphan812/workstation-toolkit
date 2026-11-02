@@ -9,6 +9,7 @@ The tests are deliberately about *consistency*, not about prose quality.
 """
 from pathlib import Path
 import ast
+import os
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -211,3 +212,47 @@ def test_every_document_is_in_english():
     for document in DOCS:
         offenders = sorted(set(non_ascii_words.findall(_read(document))))
         assert not offenders, f"{document.name} contains non-English characters"
+
+def test_exit_codes_are_documented():
+    """The command reference must state what each exit code means."""
+    reference = _read(ROOT / "docs" / "command-reference.md")
+    assert "## Exit codes" in reference, "the exit codes must be documented"
+    for code in ("`0`", "`1`", "`2`"):
+        assert f"| {code} |" in reference, f"exit code {code} is not documented"
+
+
+def test_documented_exit_codes_match_the_cli_behaviour():
+    """The documented exit codes must be the ones the CLI actually returns.
+
+    Argparse rejects invalid arguments with exit code 2; the CLI signals a
+    reported failure with exit code 1 and success with exit code 0.
+    """
+    import argparse
+    import subprocess
+    import sys
+
+    python = sys.executable
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT / "src")
+
+    def run(args):
+        result = subprocess.run(
+            [python, "-m", "workstation"] + args, cwd=ROOT, env=env,
+            capture_output=True, text=True, timeout=300)
+        return result.returncode
+
+    # Invalid arguments are rejected by the parser with exit code 2.
+    assert run(["loc"]) == 2, "a missing required argument must exit 2"
+    # A successful read-only command exits 0.
+    assert run(["storage"]) == 0, "a successful command must exit 0"
+    # A failure that prevents the command from running is reported as a
+    # single line, not as a traceback.
+    result = subprocess.run(
+        [python, "-m", "workstation", "backup", "verify",
+         str(ROOT / "no-such-manifest.json")],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 1
+    assert "Traceback" not in result.stderr, (
+        "a failure must be reported cleanly, not as a traceback")
+    assert len(result.stderr.strip().splitlines()) == 1, (
+        "a failure must be reported as a single line")
