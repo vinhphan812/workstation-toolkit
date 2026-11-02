@@ -1,6 +1,7 @@
 """Kanban board health, archive planning, and selective archiving."""
 from __future__ import annotations
-import json, os, shutil, sqlite3
+import json, os, shutil, sqlite3, tempfile
+
 from datetime import datetime, timezone
 from pathlib import Path
 from workstation.config import get_hermes_home
@@ -126,8 +127,28 @@ def _archive_task(board_name: str, task_id: str, execute: bool = False) -> dict:
             conn.rollback()
             return {'task_id': task_id, 'action': 'dry_run', 'destination': str(archive_file)}
         archive_dir.mkdir(parents=True, exist_ok=True)
-        with open(archive_file, 'w', encoding='utf-8') as fh:
-            json.dump(task, fh, indent=2, default=str)
+        # Fail closed for existing regular files and symlinks.
+        if archive_file.exists() or archive_file.is_symlink():
+            conn.rollback()
+            return {'task_id': task_id, 'skipped': True, 'reason': 'archive destination already exists', 'destination': str(archive_file)}
+        fd, temp_name = tempfile.mkstemp(prefix=f'.{task_id}.', suffix='.tmp', dir=archive_dir)
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+                json.dump(task, fh, indent=2, default=str)
+                fh.flush()
+                os.fsync(fh.fileno())
+            with temp_path.open(encoding='utf-8') as fh:
+                archived_task = json.load(fh)
+            if not isinstance(archived_task, dict) or archived_task.get('id') != task_id:
+                raise ValueError('archive verification failed: task id mismatch')
+            # Hard-link publication is atomic and refuses a destination race.
+            os.link(temp_path, archive_file)
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
         conn.execute('DELETE FROM tasks WHERE id=?', (task_id,))
         conn.commit()
     except Exception:
