@@ -1,4 +1,5 @@
 {
+  "_warning": "Configured commands are executable code. Prefer {\"argv\": [...]} so arguments are passed literally without a shell. {\"shell\": \"...\"} is interpreted by the platform shell and requires the operator to pass --allow-shell (or set WORKSTATION_ALLOW_SHELL=1).",
   "projects": [
     {
       "name": "example-project",
@@ -6,17 +7,11 @@
       "type": "python",
       "environment": {},
       "commands": {
-        "status": ["git", "status", "--short"],
-        "test": ["python", "-m", "pytest"],
-        "lint": ["python", "-m", "ruff", "check", "."]
+        "status": {"argv": ["git", "status", "--short"]},
+        "test": {"argv": ["python", "-m", "pytest"]},
+        "lint": {"argv": ["python", "-m", "ruff", "check", "."]}
       },
       "timeouts": {"test": 900, "lint": 300}
     }
   ]
 }
-
-Commands should use argv arrays so argument text is passed literally without
-shell interpretation. Legacy strings are accepted only with `"trusted_shell": true`
-on the individual project; that explicitly opts into executing trusted local shell
-code when `--execute` is used. Treat project configuration and environment values
-as executable-code inputs.
