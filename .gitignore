@@ -6,6 +6,8 @@ dist/
 build/
 
 # Local config (per-machine)
+# The loader reads config/local.json, so that file must be ignored too.
+config/local.json
 config/local.toml
 config/repos.json
 config/projects.json
