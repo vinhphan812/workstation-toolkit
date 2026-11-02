@@ -135,6 +135,78 @@ def test_force_false_refuses_nonempty_quarantined_directory(tmp_path):
     assert (target / "safe.txt").read_text() == "keep me"
 
 
+def test_late_registration_at_rmtree_boundary_is_refused_and_tree_preserved(tmp_path, monkeypatch):
+    """Regression for the registration-after-final-query/before-delete gap.
+
+    A Git worktree registration can complete *after* the final
+    `git worktree list` query has already produced its snapshot, i.e. inside
+    the window between that query and the destructive `shutil.rmtree` call.
+    The final listing therefore does not (and cannot) observe it.
+
+    The quarantined tree is the authority on its own registration: it
+    carries an in-tree `.git` marker pointing at the live administrative
+    directory. Deleting such a tree recursively destroys a registered
+    worktree, so the delete must be refused and the tree preserved.
+    """
+    import shutil
+    import workstation.core.worktree as module
+
+    repo = tmp_path / "repo"
+    target = repo / ".worktrees" / "candidate"
+    target.mkdir(parents=True)
+    (target / "safe.txt").write_text("keep me")
+    wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
+
+    # A live administrative directory, as Git would create for a worktree.
+    admin = repo / ".git" / "worktrees" / "late"
+    admin.mkdir(parents=True)
+
+    rmtree_calls = []
+    real_rmtree = shutil.rmtree
+
+    def spy_rmtree(path, *args, **kwargs):
+        rmtree_calls.append(path)
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", spy_rmtree)
+
+    def fake_run_git(repo_path, *args):
+        # The final listing snapshot was taken *before* the registration
+        # completed, so it cannot mention the worktree. The registration
+        # lands immediately afterwards, in the window before the delete.
+        quarantine = next((repo / ".worktrees").glob(".delete-*"))
+        (quarantine / ".git").write_text("gitdir: %s\n" % admin)
+        return ("", 0)
+
+    monkeypatch.setattr(module, "_run_git", fake_run_git)
+
+    assert delete_worktree(wt) is False
+    assert rmtree_calls == [], "quarantined tree was recursively deleted"
+    assert (target / "safe.txt").read_text() == "keep me"
+    assert sorted(p.name for p in (repo / ".worktrees").iterdir()) == ["candidate"]
+
+
+def test_stale_marker_orphan_is_still_deletable(tmp_path):
+    """A pruned orphan keeps a stale in-tree `.git` marker.
+
+    Its admin dir is gone, so it is not a registered worktree and must stay
+    deletable -- otherwise the guard would make genuine orphan cleanup
+    impossible. Only a marker pointing at a *live* admin dir blocks deletion.
+    """
+    repo = tmp_path / "repo"
+    target = repo / ".worktrees" / "orphaned"
+    target.mkdir(parents=True)
+    (target / "file.txt").write_text("temp")
+    stale = repo / ".git" / "worktrees" / "gone"
+    (target / ".git").write_text("gitdir: %s\n" % stale)
+    assert not stale.exists()
+
+    wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
+    with patch("workstation.core.worktree._run_git", return_value=("", 0)):
+        assert delete_worktree(wt) is True
+    assert not target.exists()
+
+
 def test_parses_detached_registered_worktree(tmp_path, monkeypatch):
     from workstation.core.worktree import get_git_worktrees
     import workstation.core.worktree as module

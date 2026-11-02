@@ -117,6 +117,45 @@ def audit_all_worktrees(repos: List[str]) -> dict:
         "total_orphaned_size_mb": round(sum(w.size_mb for w in orphaned), 2),
     }
 
+def _worktree_marker_admin_dir(tree: str) -> str | None:
+    """Return the admin dir an in-tree worktree marker points at, or None.
+
+    A linked worktree carries an in-tree `.git` *file* whose first line is
+    `gitdir: <path>`. The path may be absolute or relative to `tree`.
+    A `.git` *directory* is not a worktree marker (that is a nested
+    repository) and yields None.
+    """
+    marker = os.path.join(tree, ".git")
+    if os.path.islink(marker) or not os.path.isfile(marker):
+        return None
+    try:
+        with open(marker, "r", encoding="utf-8", errors="replace") as fh:
+            first = fh.readline().strip()
+    except OSError:
+        return None
+    if not first.lower().startswith("gitdir:"):
+        return None
+    admin = first.split(":", 1)[1].strip()
+    if not admin:
+        return None
+    if not os.path.isabs(admin):
+        admin = os.path.join(tree, admin)
+    return os.path.normpath(admin)
+
+def _is_live_worktree_registration(tree: str) -> bool:
+    """True when `tree` carries a live Git worktree registration.
+
+    Git creates the administrative directory *before* it writes the in-tree
+    marker, so a marker whose admin dir still exists means the worktree is
+    registered (or its registration is completing right now). A marker whose
+    admin dir is gone is stale -- the tree is a genuine orphan and must stay
+    deletable.
+    """
+    admin = _worktree_marker_admin_dir(tree)
+    if admin is None:
+        return False
+    return os.path.isdir(admin)
+
 def delete_worktree(wt: WorktreeInfo, force: bool = True) -> bool:
     """Delete a positively classified orphan beneath this repo's .worktrees."""
     import shutil
@@ -170,6 +209,25 @@ def delete_worktree(wt: WorktreeInfo, force: bool = True) -> bool:
             return False
         if os.path.lexists(candidate):
             # A replacement claimed the original name. Preserve both trees.
+            return False
+        # Boundary check. A registration can complete after the final
+        # listing query above has taken its snapshot, so the listing cannot
+        # observe it. The quarantined tree's own in-tree marker is the
+        # registration's own record and is written by Git as part of that
+        # registration, so it is read here at the destructive boundary
+        # rather than from a repo-wide snapshot. A tree carrying a marker
+        # for a live admin dir is a registered worktree and is never
+        # recursively deleted.
+        #
+        # Limitation, stated plainly: Git exposes no lock or coordination
+        # primitive for worktree registration, so removal cannot be made
+        # atomic with a concurrent `git worktree add`. A registration that
+        # writes its marker after this check is not observable by any
+        # pre-delete check; what this guard does guarantee is that a
+        # registration already recorded in the tree is never destroyed.
+        if _is_live_worktree_registration(quarantine):
+            if not os.path.lexists(candidate):
+                os.rename(quarantine, candidate)
             return False
         if force:
             shutil.rmtree(quarantine)
