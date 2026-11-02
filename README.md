@@ -110,6 +110,13 @@ python -m workstation docker --prune --images --volumes --yes
 # Hermes profile/state database health
 python -m workstation hermes
 
+# Create a versioned backup; verify all stored payload digests without mutation
+python -m workstation backup --label workstation
+python -m workstation backup verify D:/backups/<backup-id>/manifest.json
+
+# Preflight every restore entry and authorized path without mutation
+python -m workstation restore D:/backups/manifest.json --plan --allowed-root D:/projects
+
 # Restore a manifest only into explicitly authorized destination roots
 # Manifest backup directories must be trusted and not concurrently modified.
 # Restore is POSIX-only: destination writes are bound to a directory descriptor
@@ -184,3 +191,10 @@ uv run python -m compileall -q src
 ```
 
 Current tests cover disk inspection, Git identity classification, protected worktree deletion, SQLite quick integrity, process orphan evidence, and adapter interfaces.
+
+
+### Backup manifest compatibility and recovery
+
+New manifests use schema version 1 and record each source's size, modification time, and SHA-256. The verifier accepts legacy manifests without a version (treated as version 0), as well as version 1; unknown or malformed versions are rejected. A source that changes while being copied is marked failed and its incomplete payload is removed. `backup verify` is read-only and reports source-missing, failed, missing-payload, and digest-mismatch entries.
+
+Use `restore --plan` before execution. It validates the complete manifest, each payload digest, and every destination against one of the explicitly supplied `--allowed-root` paths; it creates no directories or files. For recovery, first verify the trusted backup, inspect the plan, then execute restore with `--execute --yes` and the same authorized roots. Keep backup directories trusted and do not modify them concurrently. Execution requires POSIX descriptor-relative destination operations; on other platforms `restore --execute` fails closed and `--plan` remains available for read-only preflight.

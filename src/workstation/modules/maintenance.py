@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib, inspect, json, os, shutil, sqlite3, stat, subprocess, tempfile
 from pathlib import Path
 from workstation.config import TOOLKIT_ROOT, get_hermes_profile, get_hermes_home
-from workstation.core.backup import backup_files
+from workstation.core.backup import backup_files, _validate_manifest, _is_relative_to, _sha256
 from workstation.core.safety import require_execute, require_free_space
 
 
@@ -16,6 +16,111 @@ def default_backup_targets() -> list[str]:
 
 def create_backup(label: str = 'workstation') -> dict:
     return backup_files(label, default_backup_targets())
+
+
+def plan_restore(manifest_path: str, allowed_roots: list[str] | tuple[str, ...] | None = None) -> dict:
+    """Validate a complete restore plan without creating or changing files."""
+    if not allowed_roots:
+        raise ValueError('restore requires at least one --allowed-root destination')
+    roots = [Path(root).resolve(strict=True) for root in allowed_roots]
+    if not all(root.is_dir() for root in roots):
+        raise ValueError('each allowed root must be an existing directory')
+    manifest_file = Path(manifest_path).resolve(strict=True)
+    manifest = json.loads(manifest_file.read_text(encoding='utf-8'))
+    _validate_manifest(manifest)
+    backup_root = manifest_file.parent.resolve(strict=True)
+    actions = []
+    for index, entry in enumerate(manifest['files']):
+        source = Path(entry['source'])
+        if not source.is_absolute():
+            raise ValueError(f'Invalid backup manifest entry {index}: source must be absolute')
+        source = source.resolve(strict=False)
+        if not any(_is_relative_to(source, root) for root in roots):
+            raise ValueError(f'Invalid backup manifest entry {index}: source is outside allowed roots')
+        if entry['status'] == 'missing':
+            actions.append({'action': 'skip', 'source': str(source), 'reason': 'source missing at backup time'})
+            continue
+        if entry['status'] == 'failed':
+            raise ValueError(f"Invalid backup manifest entry {index}: backup entry failed: {entry.get('reason', 'backup failed')}")
+        if not entry.get('backup') or not entry.get('sha256'):
+            raise ValueError(f'Invalid backup manifest entry {index}: legacy backed_up entry lacks backup path or sha256')
+        payload = Path(entry['backup'])
+        if not payload.is_absolute(): payload = backup_root / payload
+        payload = payload.resolve(strict=True)
+        if not _is_relative_to(payload, backup_root) or not payload.is_file():
+            raise ValueError(f'Invalid backup manifest entry {index}: backup missing or escapes manifest directory')
+        actual = _sha256(payload)
+        if actual.lower() != entry['sha256'].lower():
+            raise ValueError(f'Invalid backup manifest entry {index}: checksum mismatch')
+        actions.append({'action': 'restore', 'source': str(source), 'backup': str(payload), 'sha256': actual})
+    return {'ok': True, 'dry_run': True, 'manifest': str(manifest_file), 'actions': actions}
+
+
+def _detect_descriptor_destination_support() -> bool:
+    """Detect whether destination writes can be bound to an opened directory.
+
+    `os.replace` is not listed in `os.supports_dir_fd` on Linux even though it
+    accepts `src_dir_fd`/`dst_dir_fd`, so its signature is inspected directly.
+    Detection runs at import time so tests that patch `os` helpers cannot
+    change the recorded platform capability.
+    """
+    if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW'):
+        return False
+    if not (os.open in os.supports_dir_fd and os.unlink in os.supports_dir_fd and os.mkdir in os.supports_dir_fd):
+        return False
+    try:
+        parameters = inspect.signature(os.replace).parameters
+    except (TypeError, ValueError):
+        return False
+    return 'src_dir_fd' in parameters and 'dst_dir_fd' in parameters
+
+
+_DESCRIPTOR_DESTINATION_SUPPORTED = _detect_descriptor_destination_support()
+
+
+def _descriptor_destination_supported() -> bool:
+    """True when this platform can bind destination writes to an open directory."""
+    return _DESCRIPTOR_DESTINATION_SUPPORTED
+
+
+def _open_destination_parent(source: Path, roots: list[Path]):
+    """Open or create the destination parent without following swapped components."""
+    root = next((candidate for candidate in roots if _is_relative_to(source, candidate)), None)
+    if root is None:
+        raise ValueError('destination parent is outside allowed roots')
+    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW
+    current = os.open(root, flags)
+    try:
+        for component in source.parent.relative_to(root).parts:
+            if component in ('', '.'):
+                continue
+            try:
+                child = os.open(component, flags, dir_fd=current)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=current)
+                except FileExistsError:
+                    pass
+                child = os.open(component, flags, dir_fd=current)
+            os.close(current)
+            current = child
+        return current, source.name
+    except Exception:
+        os.close(current)
+        raise
+
+
+def _create_stage_at(parent_fd: int, leaf: str) -> tuple[int, str]:
+    """Create a unique staging file inside the already-open destination parent."""
+    import secrets
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    for _ in range(100):
+        name = f'.{leaf}.restore-{secrets.token_hex(8)}'
+        try:
+            return os.open(name, flags, 0o600, dir_fd=parent_fd), name
+        except FileExistsError:
+            continue
+    raise FileExistsError('unable to create unique restore staging file')
 
 
 def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False, allowed_roots: list[str] | tuple[str, ...] | None = None) -> dict:
@@ -39,8 +144,7 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
         raise ValueError('each allowed root must be an existing directory')
     manifest_file = Path(manifest_path).resolve(strict=True)
     manifest = json.loads(manifest_file.read_text(encoding='utf-8'))
-    if not isinstance(manifest, dict) or not isinstance(manifest.get('files'), list):
-        raise ValueError("Invalid backup manifest: 'files' must be a list")
+    _validate_manifest(manifest)
     restored, skipped, failed = [], [], []
     backup_root = manifest_file.parent.resolve(strict=True)
     validated = []
@@ -90,7 +194,9 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
             skipped.append({**entry, 'reason': 'backup missing'})
             continue
         # Payload reads use O_NOFOLLOW for the final component. Destination
-        # mutations below are anchored to an opened parent directory on POSIX.
+        # writes below are anchored to a parent directory descriptor opened by
+        # traversing from the authorized root, so a swapped parent cannot
+        # redirect them.
         nofollow = getattr(os, 'O_NOFOLLOW', 0)
         flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | nofollow
         try:
@@ -98,7 +204,6 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
         except OSError as exc:
             raise ValueError(f'Unable to safely open backup payload: {exc}') from exc
         temp_name = None
-        destination_fd = None
         try:
             with os.fdopen(fd, 'rb', closefd=False) as stream:
                 info = os.fstat(stream.fileno())
@@ -115,113 +220,44 @@ def restore_backup(manifest_path: str, execute: bool = False, yes: bool = False,
                     continue
                 stream.seek(0)
                 try:
-                    stage_fd, temp_name, destination_fd, leaf_name = _open_destination_parent(source, roots)
+                    destination_fd, leaf_name = _open_destination_parent(source, roots)
                 except (OSError, ValueError) as exc:
                     failed.append({**entry, 'reason': f'destination parent unavailable: {exc}', 'source_preserved': True, 'backup_preserved': True})
                     continue
-                copy_hash = hashlib.sha256()
-                with os.fdopen(stage_fd, 'wb') as out:
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-                        copy_hash.update(chunk)
-                        out.write(chunk)
-                    out.flush()
-                    os.fsync(out.fileno())
-                if copy_hash.hexdigest().lower() != expected.lower():
-                    failed.append({**entry, 'reason': 'source changed during staging', 'expected_sha256': expected, 'actual_sha256': copy_hash.hexdigest(), 'evidence_path': temp_name, 'source_preserved': True, 'backup_preserved': True})
+                try:
+                    stage_fd, temp_name = _create_stage_at(destination_fd, leaf_name)
+                    copy_hash = hashlib.sha256()
+                    with os.fdopen(stage_fd, 'wb') as out:
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                            copy_hash.update(chunk)
+                            out.write(chunk)
+                        out.flush()
+                        os.fsync(out.fileno())
+                    if copy_hash.hexdigest().lower() != expected.lower():
+                        failed.append({**entry, 'reason': 'source changed during staging', 'expected_sha256': expected, 'actual_sha256': copy_hash.hexdigest(), 'evidence_path': str(source.parent / temp_name), 'source_preserved': True, 'backup_preserved': True})
+                        temp_name = None
+                        continue
+                    staged_hash = hashlib.sha256()
+                    with os.fdopen(os.open(temp_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=destination_fd), 'rb') as staged:
+                        for chunk in iter(lambda: staged.read(1024 * 1024), b''):
+                            staged_hash.update(chunk)
+                    if staged_hash.hexdigest().lower() != expected.lower():
+                        failed.append({**entry, 'reason': 'post-copy checksum mismatch', 'expected_sha256': expected, 'actual_sha256': staged_hash.hexdigest(), 'evidence_path': str(source.parent / temp_name), 'source_preserved': True, 'backup_preserved': True})
+                        temp_name = None
+                        continue
+                    os.replace(temp_name, leaf_name, src_dir_fd=destination_fd, dst_dir_fd=destination_fd)
                     temp_name = None
-                    continue
+                    restored.append(str(source))
+                finally:
+                    if temp_name is not None:
+                        try:
+                            os.unlink(temp_name, dir_fd=destination_fd)
+                        except (FileNotFoundError, OSError):
+                            pass
+                    os.close(destination_fd)
         finally:
             os.close(fd)
-        try:
-            staged_hash = hashlib.sha256()
-            staged_file = os.fdopen(os.open(temp_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=destination_fd), 'rb')
-            with staged_file as staged:
-                for chunk in iter(lambda: staged.read(1024 * 1024), b''):
-                    staged_hash.update(chunk)
-            if staged_hash.hexdigest().lower() != expected.lower():
-                failed.append({**entry, 'reason': 'post-copy checksum mismatch', 'expected_sha256': expected, 'actual_sha256': staged_hash.hexdigest(), 'evidence_path': temp_name, 'source_preserved': True, 'backup_preserved': True})
-                temp_name = None
-                continue
-            os.replace(temp_name, leaf_name, src_dir_fd=destination_fd, dst_dir_fd=destination_fd)
-            temp_name = None
-            restored.append(str(source))
-        finally:
-            if temp_name is not None:
-                try:
-                    os.unlink(temp_name, dir_fd=destination_fd)
-                except (FileNotFoundError, OSError):
-                    pass
-            os.close(destination_fd)
     return {'ok': not failed, 'restored': restored, 'skipped': skipped, 'failed': failed}
-
-
-def _detect_descriptor_destination_support() -> bool:
-    """Detect whether destination writes can be bound to an opened directory.
-
-    `os.replace` is not listed in `os.supports_dir_fd` on Linux even though it
-    accepts `src_dir_fd`/`dst_dir_fd`, so its signature is inspected directly.
-    Detection runs at import time so that tests which temporarily patch `os`
-    helpers cannot change the recorded platform capability.
-    """
-    if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW'):
-        return False
-    if not (os.open in os.supports_dir_fd and os.unlink in os.supports_dir_fd and os.mkdir in os.supports_dir_fd):
-        return False
-    try:
-        parameters = inspect.signature(os.replace).parameters
-    except (TypeError, ValueError):
-        return False
-    return 'src_dir_fd' in parameters and 'dst_dir_fd' in parameters
-
-
-_DESCRIPTOR_DESTINATION_SUPPORTED = _detect_descriptor_destination_support()
-
-
-def _descriptor_destination_supported() -> bool:
-    """True when this platform can bind destination writes to an open directory."""
-    return _DESCRIPTOR_DESTINATION_SUPPORTED
-
-
-def _open_destination_parent(source: Path, roots: list[Path]):
-    """Create/open the parent without following swapped path components (POSIX)."""
-    if not _descriptor_destination_supported():
-        raise OSError('descriptor-relative destination operations are unavailable on this platform')
-
-    root = next((r for r in roots if _is_relative_to(source, r)), None)
-    if root is None:
-        raise ValueError('destination parent changed outside allowed roots')
-    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW
-    current = os.open(root, flags)
-    try:
-        relative_parent = source.parent.relative_to(root)
-        for part in relative_parent.parts:
-            if part in ('', '.'):
-                continue
-            try:
-                child = os.open(part, flags, dir_fd=current)
-            except FileNotFoundError:
-                os.mkdir(part, dir_fd=current)
-                child = os.open(part, flags, dir_fd=current)
-            os.close(current)
-            current = child
-        leaf = source.name
-        fd, temp_name = _create_stage_at(current, leaf)
-        return fd, temp_name, current, leaf
-    except Exception:
-        os.close(current)
-        raise
-
-
-def _create_stage_at(parent_fd: int, leaf: str) -> tuple[int, str]:
-    import secrets
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
-    for _ in range(100):
-        name = f'.{leaf}.restore-{secrets.token_hex(8)}'
-        try:
-            return os.open(name, flags, 0o600, dir_fd=parent_fd), name
-        except FileExistsError:
-            continue
-    raise FileExistsError('unable to create unique restore staging file')
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
