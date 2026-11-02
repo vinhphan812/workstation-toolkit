@@ -11,6 +11,8 @@ A **cross-platform workstation operations toolkit** for Windows, Linux, and macO
 - The worktree audit never mutates the filesystem while probing, and reports lock state as `locked`, `unlocked`, or `unknown` rather than guessing. `unknown` means the platform offers no reliable read-only evidence (for example POSIX, where an open file can still be unlinked).
 - Git identity remediation only unsets known unsafe local identities, such as `hermes@agent.local`; it never writes a local identity.
 - Large Hermes SQLite databases are not integrity-scanned in the fast health check; the command reports that this work is deferred rather than blocking for minutes.
+- Backup payloads are named so that same-named sources never share one payload file; every manifest entry records its own payload path and digest.
+- Backup manifests keep the same schema, so manifests written by earlier versions still restore.
 
 ## Requirements
 

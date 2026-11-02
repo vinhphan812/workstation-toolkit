@@ -19,6 +19,8 @@ from workstation.core import permissions
 
 BACKUPS_DIR = TOOLKIT_ROOT / "backups"
 MANIFEST_VERSION = 1
+# The manifest is written beside the payloads, so its name is never a payload.
+MANIFEST_NAME = "manifest.json"
 
 
 def _copy_private(source: Path, target: Path) -> permissions.PermissionResult:
@@ -72,11 +74,52 @@ def _require_enforced(result: permissions.PermissionResult, what: str) -> None:
         )
 
 
+class _PayloadNamer:
+    """Assign each copied file a payload name no other file can claim.
+
+    A source keeps its own basename while that name is free. Sources that
+    share a basename, and sources whose name is already taken, fall back to
+    a numbered variant that shadows no candidate basename. Names are compared
+    case-insensitively because Windows and macOS volumes are
+    case-insensitive, so two payloads can never land on one file.
+    """
+
+    def __init__(self, candidates: list[Path], occupied: tuple[str, ...] = ()) -> None:
+        self.reserved = {source.name.casefold() for source in candidates}
+        self.occupied = {name.casefold() for name in occupied}
+        self.reserved |= self.occupied
+        self.used: set[str] = set()
+
+    def claim(self, source: Path) -> str:
+        name = source.name
+        folded = name.casefold()
+        if folded not in self.used and folded not in self.occupied:
+            payload = name
+        else:
+            stem = Path(name).stem
+            suffix = Path(name).suffix
+            index = 0
+            while True:
+                index += 1
+                candidate = f"{stem}~{index}{suffix}"
+                if candidate.casefold() not in self.used and candidate.casefold() not in self.reserved:
+                    payload = candidate
+                    break
+        self.used.add(payload.casefold())
+        return payload
+
+
 def backup_files(label: str, paths: list[str], *, allow_partial: bool = False) -> dict:
     """Copy existing files after a volume-space preflight.
 
     A 64 MiB margin is reserved. By default, insufficient capacity fails
     before copying rather than leaving a partial multi-GB backup.
+
+    Sources that share a basename are copied to distinct payloads, so one
+    payload is never overwritten and every manifest entry names its own
+    payload with its own digest. The manifest schema is unchanged: each
+    entry keeps its source path, payload path, size and digest, so manifests
+    written by earlier versions still restore.
 
     Sources are checked before and after copying; changing sources are
     reported as failed and never included as complete.
@@ -90,7 +133,8 @@ def backup_files(label: str, paths: list[str], *, allow_partial: bool = False) -
     and the destination directory it created is removed, so no unprotected
     copy of sensitive data is left behind.
     """
-    existing = [Path(raw) for raw in paths if Path(raw).is_file()]
+    candidates = [Path(raw) for raw in paths]
+    existing = [source for source in candidates if source.is_file()]
     required = sum(item.stat().st_size for item in existing) + 64 * 1024 * 1024
     root_result = permissions.ensure_directory(BACKUPS_DIR)
     _require_enforced(root_result, "root")
@@ -103,18 +147,26 @@ def backup_files(label: str, paths: list[str], *, allow_partial: bool = False) -
     # propagates without the cleanup below removing a directory that this
     # call did not create.
     destination_result = permissions.create_directory(destination)
+    namer = _PayloadNamer(candidates, occupied=(MANIFEST_NAME,))
     entries = []
     results = [root_result, destination_result]
     try:
         _require_enforced(destination_result, "directory")
-        for raw in paths:
-            source = Path(raw)
+        for source in candidates:
             if not source.is_file():
                 entries.append({"source": str(source), "status": "missing"})
                 continue
             before = source.stat()
-            target = destination / source.name
-            payload_result = _copy_private(source, target)
+            target = destination / namer.claim(source)
+            try:
+                payload_result = _copy_private(source, target)
+            except FileNotFoundError:
+                # The source disappeared between the check and the copy, so
+                # no payload exists for it.  The partially created target is
+                # removed instead of being left behind as an empty payload.
+                target.unlink(missing_ok=True)
+                entries.append({"source": str(source), "status": "missing"})
+                continue
             _require_enforced(payload_result, "payload")
             results.append(payload_result)
             after = source.stat()
@@ -132,7 +184,7 @@ def backup_files(label: str, paths: list[str], *, allow_partial: bool = False) -
         # The manifest is created empty and owner-only first, so the summary
         # it records can cover the manifest itself and not only the payloads
         # that were written before it.
-        manifest_path = destination / "manifest.json"
+        manifest_path = destination / MANIFEST_NAME
         manifest_result = permissions.write_private_text(manifest_path, "")
         _require_enforced(manifest_result, "manifest")
         manifest_index = len(results)
