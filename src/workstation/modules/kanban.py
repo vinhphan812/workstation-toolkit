@@ -37,7 +37,7 @@ def kanban_health() -> dict:
     boards_root = _boards_root()
     boards = []
     if not boards_root.is_dir():
-        return {'status': 'unavailable', 'boards_root': str(boards_root), 'boards': []}
+        return {'ok': False, 'status': 'unavailable', 'boards_root': str(boards_root), 'boards': []}
     for board, db in _board_db_paths(boards_root):
         board_info = {'name': board.name, 'database': str(db), 'size_mb': round(db.stat().st_size/(1024**2),2),
                       'wal_mb': round(_size(Path(str(db)+'-wal'))/(1024**2),2), 'integrity': None, 'statuses': {}, 'done_before_cutoff': 0}
@@ -57,8 +57,14 @@ def kanban_health() -> dict:
             conn.close()
         except Exception as exc:
             board_info['integrity'] = f'unavailable: {exc}'
+            board_info['error'] = str(exc)
         boards.append(board_info)
-    return {'status': 'available', 'boards_root': str(boards_root), 'boards': boards}
+    # The health check is only fully successful when every board could be
+    # inspected. A board that could not be opened is reported per board and
+    # makes the overall result not-ok, so the exit code reflects it.
+    unreadable = [b['name'] for b in boards if 'error' in b]
+    return {'ok': not unreadable, 'status': 'available', 'boards_root': str(boards_root), 'boards': boards,
+            'unreadable_boards': unreadable}
 
 
 def archive_plan(days: int = 30) -> dict:
@@ -79,7 +85,12 @@ def archive_plan(days: int = 30) -> dict:
             candidates.append({'board': board['name'], 'count': len(rows), 'tasks': [{'id': row[0], 'title': row[1], 'completed_at': row[2]} for row in rows]})
         except Exception as exc:
             candidates.append({'board': board['name'], 'error': str(exc), 'count': 0, 'tasks': []})
-    return {'days': days, 'cutoff_epoch': cutoff, 'boards': candidates,
+    # A plan that could not read every board is not a complete plan, so it
+    # must not report success.
+    unreadable = [c['board'] for c in candidates if 'error' in c]
+    return {'ok': bool(health.get('ok', False)) and not unreadable,
+            'days': days, 'cutoff_epoch': cutoff, 'boards': candidates,
+            'unreadable_boards': unreadable,
             'safety': 'Plan only. Archive implementation must export JSON and require explicit confirmation per board.'}
 
 
@@ -189,6 +200,7 @@ def archive_tasks(days: int = 30, board: str | None = None,
             else:
                 archived.append(result)
     return {
+        'ok': not any(r.get('error') for r in archived + skipped),
         'days': days,
         'board': board,
         'execute': execute,

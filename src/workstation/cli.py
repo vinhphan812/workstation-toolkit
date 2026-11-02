@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from workstation.config import load_repos
 from workstation.core.reporting import write_report
@@ -157,18 +158,6 @@ def cmd_forecast(args):
     _emit(report, args, "disk_forecast")
 
 
-def cmd_kanban(args):
-    from workstation.modules.kanban import kanban_health, archive_plan, print_kanban_health, print_archive_plan
-    if args.archive_plan is not None:
-        report = archive_plan(args.archive_plan)
-        print_archive_plan(report)
-        _emit(report, args, "kanban_archive_plan")
-    else:
-        report = kanban_health()
-        print_kanban_health(report)
-        _emit(report, args, "kanban_health")
-
-
 def cmd_project(args):
     from workstation.modules.projects import project_status, run_project_command
     if args.project_action == "status":
@@ -181,8 +170,6 @@ def cmd_project(args):
     _emit(report, args, f"project_{args.project}_{args.project_action}")
     if not report.get("ok"):
         raise SystemExit(1)
-
-
 
 
 def cmd_kanban(args):
@@ -227,7 +214,11 @@ def cmd_backup(args):
 
 def cmd_backup_verify(args):
     from workstation.core.backup import verify_backup
-    report = verify_backup(args.manifest)
+    try:
+        report = verify_backup(args.manifest)
+    except Exception as exc:
+        raise SystemExit(f"Backup verification failed: {exc}")
+    print(json.dumps(report, indent=2))
     _emit(report, args, "backup_verify")
     if not report.get("ok", False): raise SystemExit(1)
 
