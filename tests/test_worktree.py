@@ -36,13 +36,200 @@ def test_never_delete_known_worktree(tmp_path):
     assert d.exists()
 
 def test_delete_orphaned_empty_worktree(tmp_path):
-    d = tmp_path / "orphaned"
-    d.mkdir()
+    repo = tmp_path / "repo"
+    d = repo / ".worktrees" / "orphaned"
+    d.mkdir(parents=True)
     (d / "file.txt").write_text("temp")
-    wt = WorktreeInfo(path=str(d), repo="repo", is_known=False, is_orphaned=True,
+    wt = WorktreeInfo(path=str(d), repo=str(repo), is_known=False, is_orphaned=True,
                       is_locked=False, size_mb=0, branch="unknown")
-    assert delete_worktree(wt) is True
+    with patch("workstation.core.worktree._run_git", return_value=("", 0)):
+        assert delete_worktree(wt) is True
     assert not d.exists()
+
+
+def test_refuse_path_escape_and_unclassified(tmp_path):
+    from workstation.core.worktree import delete_worktree
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    wt = WorktreeInfo(str(outside), str(repo), False, True, False, 0, "unknown")
+    with patch("workstation.core.worktree.get_git_worktrees", return_value={}):
+        assert not delete_worktree(wt)
+    assert outside.exists()
+    inside = repo / ".worktrees" / "candidate"
+    inside.mkdir(parents=True)
+    wt.path = str(inside)
+    wt.is_orphaned = False
+    assert not delete_worktree(wt)
+    assert inside.exists()
+
+
+def test_symlink_escape_is_not_deleted(tmp_path):
+    repo = tmp_path / "repo"
+    root = repo / ".worktrees"
+    root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = root / "escape"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        import pytest
+        pytest.skip("directory symlinks unavailable")
+    wt = WorktreeInfo(str(link), str(repo), False, True, False, 0, "unknown")
+    assert not delete_worktree(wt)
+    assert outside.exists()
+    assert link.is_symlink()
+
+
+def test_registered_recheck_refuses_stale_orphan(tmp_path):
+    repo = tmp_path / "repo"
+    target = repo / ".worktrees" / "candidate"
+    target.mkdir(parents=True)
+    wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
+    with patch("workstation.core.worktree.get_git_worktrees", return_value={os.path.normcase(os.path.normpath(str(target))): "branch"}):
+        assert not delete_worktree(wt)
+    assert target.exists()
+
+
+def test_registration_race_after_quarantine_refuses_and_restores_candidate(tmp_path, monkeypatch):
+    import workstation.core.worktree as module
+
+    repo = tmp_path / "repo"
+    target = repo / ".worktrees" / "candidate"
+    target.mkdir(parents=True)
+    (target / "safe.txt").write_text("keep me")
+    wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
+
+    real_rename = module.os.rename
+    rename_calls = []
+
+    def register_after_quarantine(source, destination, *_args):
+        result = real_rename(source, destination)
+        rename_calls.append((source, destination))
+        if len(rename_calls) == 1:
+            # Simulate `git worktree add` registering the original path after
+            # deletion has atomically moved it aside but before the final query.
+            module._run_git = lambda *_: (f"worktree {target}\nbranch refs/heads/live", 0)
+        return result
+
+    monkeypatch.setattr(module.os, "rename", register_after_quarantine)
+    monkeypatch.setattr(module, "_run_git", lambda *_: ("", 0))
+    assert delete_worktree(wt) is False
+    assert len(rename_calls) == 2  # quarantine, then restore; never delete
+    assert (target / "safe.txt").read_text() == "keep me"
+    assert sorted(p.name for p in (repo / ".worktrees").iterdir()) == ["candidate"]
+
+
+def test_candidate_replaced_after_quarantine_is_never_deleted(tmp_path, monkeypatch):
+    import workstation.core.worktree as module
+
+    repo = tmp_path / "repo"
+    target = repo / ".worktrees" / "candidate"
+    target.mkdir(parents=True)
+    (target / "original.txt").write_text("original")
+    wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
+    real_rename = module.os.rename
+    calls = [0]
+
+    def replace_path_after_move(source, destination, *_args):
+        result = real_rename(source, destination)
+        calls[0] += 1
+        if calls[0] == 1:
+            target.mkdir()
+            (target / "outside.txt").write_text("must survive")
+        return result
+
+    monkeypatch.setattr(module.os, "rename", replace_path_after_move)
+    monkeypatch.setattr(module, "_run_git", lambda *_: ("", 0))
+    assert delete_worktree(wt) is False
+    assert (target / "outside.txt").read_text() == "must survive"
+    quarantine = next((repo / ".worktrees").glob(".delete-*"))
+    assert (quarantine / "original.txt").read_text() == "original"
+
+
+def test_force_false_refuses_nonempty_quarantined_directory(tmp_path):
+    repo = tmp_path / "repo"
+    target = repo / ".worktrees" / "candidate"
+    target.mkdir(parents=True)
+    (target / "safe.txt").write_text("keep me")
+    wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
+    with patch("workstation.core.worktree._run_git", return_value=("", 0)):
+        assert delete_worktree(wt, force=False) is False
+    assert (target / "safe.txt").read_text() == "keep me"
+
+
+def test_late_registration_at_rmtree_boundary_is_refused_and_tree_preserved(tmp_path, monkeypatch):
+    """Regression for the registration-after-final-query/before-delete gap.
+
+    A Git worktree registration can complete *after* the final
+    `git worktree list` query has already produced its snapshot, i.e. inside
+    the window between that query and the destructive `shutil.rmtree` call.
+    The final listing therefore does not (and cannot) observe it.
+
+    The quarantined tree is the authority on its own registration: it
+    carries an in-tree `.git` marker pointing at the live administrative
+    directory. Deleting such a tree recursively destroys a registered
+    worktree, so the delete must be refused and the tree preserved.
+    """
+    import shutil
+    import workstation.core.worktree as module
+
+    repo = tmp_path / "repo"
+    target = repo / ".worktrees" / "candidate"
+    target.mkdir(parents=True)
+    (target / "safe.txt").write_text("keep me")
+    wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
+
+    # A live administrative directory, as Git would create for a worktree.
+    admin = repo / ".git" / "worktrees" / "late"
+    admin.mkdir(parents=True)
+
+    rmtree_calls = []
+    real_rmtree = shutil.rmtree
+
+    def spy_rmtree(path, *args, **kwargs):
+        rmtree_calls.append(path)
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", spy_rmtree)
+
+    def fake_run_git(repo_path, *args):
+        # The final listing snapshot was taken *before* the registration
+        # completed, so it cannot mention the worktree. The registration
+        # lands immediately afterwards, in the window before the delete.
+        quarantine = next((repo / ".worktrees").glob(".delete-*"))
+        (quarantine / ".git").write_text("gitdir: %s\n" % admin)
+        return ("", 0)
+
+    monkeypatch.setattr(module, "_run_git", fake_run_git)
+
+    assert delete_worktree(wt) is False
+    assert rmtree_calls == [], "quarantined tree was recursively deleted"
+    assert (target / "safe.txt").read_text() == "keep me"
+    assert sorted(p.name for p in (repo / ".worktrees").iterdir()) == ["candidate"]
+
+
+def test_stale_marker_orphan_is_still_deletable(tmp_path):
+    """A pruned orphan keeps a stale in-tree `.git` marker.
+
+    Its admin dir is gone, so it is not a registered worktree and must stay
+    deletable -- otherwise the guard would make genuine orphan cleanup
+    impossible. Only a marker pointing at a *live* admin dir blocks deletion.
+    """
+    repo = tmp_path / "repo"
+    target = repo / ".worktrees" / "orphaned"
+    target.mkdir(parents=True)
+    (target / "file.txt").write_text("temp")
+    stale = repo / ".git" / "worktrees" / "gone"
+    (target / ".git").write_text("gitdir: %s\n" % stale)
+    assert not stale.exists()
+
+    wt = WorktreeInfo(str(target), str(repo), False, True, False, 0, "unknown")
+    with patch("workstation.core.worktree._run_git", return_value=("", 0)):
+        assert delete_worktree(wt) is True
+    assert not target.exists()
 
 
 def test_parses_detached_registered_worktree(tmp_path, monkeypatch):
@@ -212,20 +399,24 @@ def test_locked_orphan_is_not_deleted(tmp_path):
 
 
 def test_delete_orphaned_requires_confirmation(tmp_path):
-    d = tmp_path / "orphan"
-    d.mkdir()
+    # The candidate must satisfy the deletion contract: an immediate child of
+    # <repo>/.worktrees, and the Git registration re-query must succeed.
+    repo = tmp_path / "repo"
+    d = repo / ".worktrees" / "orphan"
+    d.mkdir(parents=True)
     (d / "file.txt").write_text("temp")
-    wt = WorktreeInfo(path=str(d), repo="repo", is_known=False, is_orphaned=True,
+    wt = WorktreeInfo(path=str(d), repo=str(repo), is_known=False, is_orphaned=True,
                       is_locked=False, size_mb=0, branch="unknown",
                       lock_state=LOCK_UNLOCKED)
     report = {"orphaned": [wt]}
 
-    with patch("builtins.input", return_value="n"):
-        assert delete_orphaned(report, confirm=True) == []
-    assert d.exists()
+    with patch("workstation.core.worktree._run_git", return_value=("", 0)):
+        with patch("builtins.input", return_value="n"):
+            assert delete_orphaned(report, confirm=True) == []
+        assert d.exists()
 
-    with patch("builtins.input", return_value="y"):
-        assert delete_orphaned(report, confirm=True) == [str(d)]
+        with patch("builtins.input", return_value="y"):
+            assert delete_orphaned(report, confirm=True) == [str(d)]
     assert not d.exists()
 
 
@@ -242,6 +433,12 @@ def test_cli_worktree_deletion_requires_execute_and_confirmation(tmp_path, monke
     monkeypatch.setattr(cli_module, "load_repos", lambda: [str(repo)])
     monkeypatch.setattr(
         "workstation.core.worktree.get_git_worktrees", lambda _: {},
+    )
+    # The deletion path re-queries `git worktree list` before removing the
+    # candidate; the temporary directory is not a repository, so that query is
+    # stubbed to an empty registration list.
+    monkeypatch.setattr(
+        "workstation.core.worktree._run_git", lambda *a, **k: ("", 0),
     )
 
     # No --execute: audit only, nothing is deleted.
