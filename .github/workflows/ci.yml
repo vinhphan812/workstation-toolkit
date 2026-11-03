@@ -26,3 +26,24 @@ jobs:
         run: python -m pytest -q
       - name: CLI smoke test
         run: python -m workstation --help
+
+  docs:
+    name: Documentation site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the documentation tooling
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[docs]"
+      - name: Build the site
+        # --strict turns a warning into an error, so a navigation entry that
+        # points at a missing page, or a link that does not resolve, fails
+        # the build instead of producing a broken page.
+        run: python -m mkdocs build --strict
+      - name: Upload the built site
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation-site
+          path: site/

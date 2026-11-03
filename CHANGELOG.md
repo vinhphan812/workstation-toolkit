@@ -118,6 +118,12 @@ of the backup, restore and worktree paths.
 
 ### Documentation
 
+- **The documentation was rebuilt.** `docs/index.md` is now the single entry
+  point and reaches every document, `docs/architecture.md` describes the
+  layers, the dependency direction, the execution flow and the safety model
+  as they are implemented, and `docs/templates/` holds the reusable
+  templates. The site is published with MkDocs and builds under `--strict`,
+  and a CI job builds it on every pull request. (`336a2bd`, and this change)
 - The documentation was audited and restructured: the README gained a table
   of contents, a quick start and a command table that lists every command the
   CLI exposes, and the configuration and environment sections moved into

@@ -164,13 +164,23 @@ def _docs_relative_links(document):
 
 
 def test_the_documentation_index_links_every_document():
-    """A document that no index reaches cannot be found."""
+    """A document that no index reaches cannot be found.
+
+    Each document has exactly one owning index: the templates belong to the
+    template library index, everything else to the documentation index.
+    """
     linked = _docs_relative_links(DOCS_INDEX)
+    template_linked = _docs_relative_links(TEMPLATES / "index.md")
     for document in DOCS:
         if document in (README, CONTRIBUTING, CHANGELOG, DOCS_INDEX):
             continue
-        assert str(document) in linked, (
-            f"{document.relative_to(ROOT).as_posix()} is not linked from docs/index.md")
+        # The template library index belongs to the documentation index; the
+        # templates inside it belong to the library index.
+        owner = linked
+        if document.parent == TEMPLATES and document != TEMPLATES / "index.md":
+            owner = template_linked
+        assert str(document) in owner, (
+            f"{document.relative_to(ROOT).as_posix()} is not linked from its index")
 
 
 def test_every_document_is_reachable_from_an_index():
@@ -226,12 +236,39 @@ def test_the_architecture_document_names_only_files_that_exist():
 
 
 def test_the_architecture_document_describes_every_module():
-    """Every module of the toolkit must appear in the architecture document."""
+    """Every module of the toolkit must have a row in the architecture tables."""
     text = _read(ARCHITECTURE)
-    modules = sorted(p.name for p in (ROOT / "src" / "workstation" / "modules").glob("*.py")
+    package = ROOT / "src" / "workstation"
+    modules = sorted(p.name for p in (package / "modules").glob("*.py")
                      if p.name != "__init__.py")
-    missing = [name for name in modules if name not in text]
-    assert not missing, f"modules missing from the architecture document: {missing}"
+    assert modules, "the toolkit must have modules"
+    for name in modules:
+        row = f"| `modules/{name}` |"
+        assert row in text, f"modules/{name} has no row in the architecture tables"
+
+
+def test_the_architecture_document_has_a_row_for_every_core_module():
+    """Every core module must have a row, so its responsibility is stated."""
+    text = _read(ARCHITECTURE)
+    package = ROOT / "src" / "workstation"
+    modules = sorted(p.name for p in (package / "core").glob("*.py")
+                     if p.name != "__init__.py")
+    assert modules, "the toolkit must have core modules"
+    for name in modules:
+        row = f"| `core/{name}` |"
+        assert row in text, f"core/{name} has no row in the architecture tables"
+
+
+def test_the_architecture_document_has_a_row_for_every_adapter():
+    """Every platform adapter must have a row."""
+    text = _read(ARCHITECTURE)
+    package = ROOT / "src" / "workstation"
+    adapters = sorted(p.name for p in (package / "adapters").glob("*.py")
+                      if p.name != "__init__.py")
+    assert adapters, "the toolkit must have adapters"
+    for name in adapters:
+        row = f"| `adapters/{name}` |"
+        assert row in text, f"adapters/{name} has no row in the architecture tables"
 
 
 def test_the_architecture_document_states_the_measured_tree_size():
