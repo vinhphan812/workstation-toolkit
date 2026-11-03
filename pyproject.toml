@@ -13,6 +13,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "build>=1.2", "PyYAML>=6.0"]
+docs = ["mkdocs>=1.6", "mkdocs-material>=9.5"]
 
 [project.scripts]
 workstation = "workstation.cli:main"
