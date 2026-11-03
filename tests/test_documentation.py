@@ -25,8 +25,18 @@ DOCS = (
     ROOT / "docs" / "backup-permissions.md",
     ROOT / "docs" / "command-reference.md",
     ROOT / "docs" / "configuration.md",
+    ROOT / "docs" / "architecture.md",
+    ROOT / "docs" / "index.md",
+    ROOT / "docs" / "templates" / "index.md",
+    ROOT / "docs" / "templates" / "changelog_template.md",
+    ROOT / "docs" / "templates" / "architecture_template.md",
     ROOT / "CHANGELOG.md",
 )
+
+DOCS_INDEX = ROOT / "docs" / "index.md"
+TEMPLATES = ROOT / "docs" / "templates"
+ARCHITECTURE = ROOT / "docs" / "architecture.md"
+CHANGELOG = ROOT / "CHANGELOG.md"
 
 
 def _read(path):
@@ -137,6 +147,119 @@ def _ignore_rules():
     """The ignore rules, with comments and blank lines removed."""
     return [line.strip() for line in _read(GITIGNORE).splitlines()
             if line.strip() and not line.strip().startswith("#")]
+
+
+def _docs_relative_links(document):
+    """The repository-relative targets of the Markdown links in a document."""
+    base = document.parent
+    targets = set()
+    for link in re.findall(r"\]\(([^)]+)\)", _read(document)):
+        if link.startswith(("http://", "https://", "mailto:")):
+            continue
+        path_part, _, _anchor = link.partition("#")
+        if not path_part:
+            continue
+        targets.add(os.path.normpath(os.path.join(str(base), path_part)))
+    return targets
+
+
+def test_the_documentation_index_links_every_document():
+    """A document that no index reaches cannot be found."""
+    linked = _docs_relative_links(DOCS_INDEX)
+    for document in DOCS:
+        if document in (README, CONTRIBUTING, CHANGELOG, DOCS_INDEX):
+            continue
+        assert str(document) in linked, (
+            f"{document.relative_to(ROOT).as_posix()} is not linked from docs/index.md")
+
+
+def test_every_document_is_reachable_from_an_index():
+    """Every document under docs/ is linked from the index or the template index."""
+    reachable = _docs_relative_links(DOCS_INDEX) | _docs_relative_links(TEMPLATES / "index.md")
+    for document in sorted((ROOT / "docs").rglob("*.md")):
+        if document == DOCS_INDEX:
+            continue
+        assert str(document) in reachable, (
+            f"{document.relative_to(ROOT).as_posix()} is not reachable from an index")
+
+
+def test_the_changelog_template_has_been_extracted():
+    """The template lives in the template library, not inside the changelog."""
+    template = TEMPLATES / "changelog_template.md"
+    assert template.exists(), "the changelog template must live in docs/templates/"
+    changelog = _read(CHANGELOG)
+    # The template describes the structure with placeholders; the changelog
+    # itself must not carry them.
+    assert "YYYY-MM-DD" not in changelog, "the changelog still contains a date placeholder"
+    assert "OWNER/REPO" not in changelog, "the changelog still contains a repository placeholder"
+    assert "changelog_template.md" in changelog, (
+        "the changelog must point at its own template")
+
+
+def test_the_changelog_records_every_release_and_the_unreleased_work():
+    """The changelog keeps the Keep a Changelog structure."""
+    changelog = _read(CHANGELOG)
+    versions = re.findall(r"^## \[(.+?)\]", changelog, re.M)
+    assert "Unreleased" in versions, "the changelog must have an Unreleased section"
+    assert "0.1.0" in versions, "the changelog must record the released version"
+    for version in versions:
+        assert re.search(rf"^\[{re.escape(version)}\]:\s+https://", changelog, re.M), (
+            f"version {version} has no link definition")
+    # The released version must be dated, and the unreleased section must not be.
+    assert re.search(r"^## \[0\.1\.0\] - \d{4}-\d{2}-\d{2}$", changelog, re.M), (
+        "a released version must carry its release date")
+    assert re.search(r"^## \[Unreleased\]$", changelog, re.M), (
+        "the unreleased section must not carry a date")
+
+
+def test_the_architecture_document_names_only_files_that_exist():
+    """A path in the architecture document that has been deleted is a broken claim."""
+    text = _read(ARCHITECTURE)
+    package = ROOT / "src" / "workstation"
+    referenced = set(re.findall(r"`([A-Za-z0-9_/]+\.py)`", text))
+    assert referenced, "the architecture document must name the source files"
+    for relative in sorted(referenced):
+        # The document names the files the way the package is laid out, so a
+        # path such as `core/disk.py` resolves inside the package.
+        assert (package / relative).exists() or (ROOT / relative).exists(), (
+            f"architecture names a missing file: {relative}")
+
+
+def test_the_architecture_document_describes_every_module():
+    """Every module of the toolkit must appear in the architecture document."""
+    text = _read(ARCHITECTURE)
+    modules = sorted(p.name for p in (ROOT / "src" / "workstation" / "modules").glob("*.py")
+                     if p.name != "__init__.py")
+    missing = [name for name in modules if name not in text]
+    assert not missing, f"modules missing from the architecture document: {missing}"
+
+
+def test_the_architecture_document_states_the_measured_tree_size():
+    """The line and file counts in the architecture document must be true."""
+    text = _read(ARCHITECTURE)
+    source = ROOT / "src" / "workstation"
+    files = [p for p in source.rglob("*.py") if "__pycache__" not in p.parts]
+    lines = sum(len(p.read_text(encoding="utf-8").splitlines()) for p in files)
+    assert f"| {len(files)} | {lines} |" in text, (
+        "the architecture document must state the current source file and line counts")
+
+
+def test_the_documentation_site_is_configured():
+    """The MkDocs configuration must exist and name every published page."""
+    config = ROOT / "mkdocs.yml"
+    assert config.exists(), "the documentation site needs a mkdocs.yml"
+    text = _read(config)
+    for page in ("index.md", "architecture.md", "command-reference.md",
+                 "configuration.md", "backup-permissions.md",
+                 "templates/index.md", "templates/changelog_template.md",
+                 "templates/architecture_template.md"):
+        assert page in text, f"{page} is not in the site navigation"
+
+
+def test_the_built_site_is_not_tracked():
+    """The generated site must not be committed."""
+    rules = _ignore_rules()
+    assert "site/" in rules, "the generated documentation site must be gitignored"
 
 
 def test_device_local_config_is_gitignored():

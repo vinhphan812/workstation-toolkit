@@ -86,7 +86,12 @@ the documentation in the same pull request:
 | A command or flag | `README.md`, `docs/command-reference.md` |
 | A configuration key or default | `README.md`, `docs/configuration.md` |
 | A permission or safety policy | `README.md`, `docs/backup-permissions.md` |
+| A module, layer or safety gate | `docs/architecture.md` |
 | A release or workflow policy | `README.md`, `CHANGELOG.md` |
+
+Every new document is added to `docs/index.md`, and every document listed in
+`docs/index.md` is reachable from it. The documentation index is the single
+entry point, so a document that no index reaches cannot be found.
 
 ### Style
 
@@ -97,3 +102,23 @@ the documentation in the same pull request:
 - Link between documents with relative paths, so the links work on GitHub and
   in a local checkout.
 - Keep the table of contents in `README.md` in step with its headings.
+
+## Documentation site
+
+The documentation is published as a MkDocs site. The configuration is
+`mkdocs.yml` at the repository root, and the sources are the Markdown files
+in `docs/` together with `README.md`, `CHANGELOG.md` and `CONTRIBUTING.md`.
+
+```bash
+uv run --with mkdocs --with mkdocs-material mkdocs build --strict
+```
+
+`--strict` turns a warning into an error, so the build fails on a navigation
+entry that points at a missing page or on a link that does not resolve.
+
+Two rules keep the site and the repository consistent:
+
+- A link between documents is relative, so it resolves on GitHub and in a
+  local checkout.
+- A new document starts from a template in `docs/templates/`, so it follows
+  the house structure instead of inventing one.

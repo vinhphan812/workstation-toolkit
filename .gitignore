@@ -24,3 +24,6 @@ reports/
 # Virtual envs
 venv/
 .venv/
+
+# Generated documentation site
+site/

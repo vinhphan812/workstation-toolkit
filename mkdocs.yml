@@ -1,0 +1,89 @@
+site_name: Workstation Toolkit
+site_description: >-
+  A cross-platform workstation operations toolkit for Windows, Linux and macOS.
+  It audits and maintains the developer workstation, repositories, worktrees,
+  Docker, project state and Hermes Agent.
+site_author: Vinh Phan
+repo_url: https://github.com/vinhphan812/workstation-toolkit
+repo_name: vinhphan812/workstation-toolkit
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+site_dir: site
+
+# MkDocs excludes any directory called `templates` at the root of the
+# documentation directory, because that name belongs to the theme. The
+# template library lives one level down, in `docs/templates/`, so the
+# default pattern does not match it and the negation below is only a safety
+# net for a future move.
+exclude_docs: |
+  !/templates/
+
+validation:
+  nav:
+    omitted_files: warn
+  links:
+    # The documents link to the repository root files, which are read on
+    # GitHub rather than in this site. Their integrity is checked by
+    # tests/test_documentation.py, which resolves every relative link in the
+    # whole repository, so the site does not need to warn about them.
+    not_found: ignore
+    absolute_links: warn
+    unrecognized_links: warn
+    anchors: warn
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - content.code.copy
+    - content.action.edit
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+
+nav:
+  - Home: index.md
+  - Explanation:
+      - Architecture: architecture.md
+  - Reference:
+      - Command reference: command-reference.md
+      - Configuration: configuration.md
+      - Backup permissions: backup-permissions.md
+  - Templates:
+      - Overview: templates/index.md
+      - Changelog template: templates/changelog_template.md
+      - Architecture template: templates/architecture_template.md

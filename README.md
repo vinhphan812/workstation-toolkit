@@ -428,6 +428,15 @@ interfaces, backup permission enforcement, restore validation and fail-closed
 behaviour, project command execution modes, guarded maintenance stage
 reporting, and Kanban archive publication.
 
+The documentation is a MkDocs site. Build it with a strict check, which fails
+on a broken navigation entry or an unresolvable internal link:
+
+```bash
+uv run --with mkdocs --with mkdocs-material mkdocs build --strict
+```
+
+The site is written to `site/`, which is not tracked.
+
 ### Documentation standards
 
 Documentation is written in English (UK). Every factual claim about the
@@ -446,10 +455,16 @@ matching update to:
 
 ## Further documentation
 
+The documentation index is [docs/index.md](docs/index.md). It explains which
+document to read for a given task.
+
 | Document | Contents |
 |---|---|
+| [docs/index.md](docs/index.md) | Documentation index and how the documents are organised |
+| [docs/architecture.md](docs/architecture.md) | How the toolkit is built, and why the safety rules are shaped as they are |
 | [docs/command-reference.md](docs/command-reference.md) | Every command, flag and default, verified against the CLI |
 | [docs/configuration.md](docs/configuration.md) | Configuration files, precedence and environment variables |
 | [docs/backup-permissions.md](docs/backup-permissions.md) | The backup permission policy, its verification and its platform limits |
+| [docs/templates/index.md](docs/templates/index.md) | Template library for new documents |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Safety requirements and the review process |
-| [CHANGELOG.md](CHANGELOG.md) | Released changes |
+| [CHANGELOG.md](CHANGELOG.md) | Released and unreleased changes |
