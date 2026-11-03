@@ -25,5 +25,8 @@ reports/
 venv/
 .venv/
 
+# Isolated git worktrees used for release preparation
+.worktrees/
+
 # Generated documentation site
 site/

@@ -9,40 +9,65 @@ from pathlib import Path
 from workstation.config import load_repos
 from workstation.core.reporting import write_report
 
+# When the CLI runs in JSON mode, standard output carries the machine-readable
+# document and nothing else. The human-readable prose that the commands
+# normally print is redirected to standard error, so a consumer can parse
+# standard output without having to strip anything from it.
+_real_stdout = None
+
+
+def _json_stream():
+    """The stream that carries the JSON document in JSON mode."""
+    return _real_stdout if _real_stdout is not None else sys.stdout
+
 
 def _emit(data: dict, args: argparse.Namespace, report_name: str | None = None) -> None:
     if getattr(args, "save_report", False) and report_name:
         paths = write_report(report_name, data)
         print(f"Reports: {paths['json']}\n         {paths['markdown']}")
     if getattr(args, "json", False):
-        print(json.dumps(data, indent=2, default=str))
+        print(json.dumps(data, indent=2, default=str), file=_json_stream())
+
+
+def _print_report(report: dict, args: argparse.Namespace) -> None:
+    """Print a command's JSON report in human-output mode only.
+
+    In machine-readable mode `_emit` writes the single JSON document after
+    human-readable command output has been redirected to standard error.
+    """
+    if not getattr(args, "json", False):
+        print(json.dumps(report, indent=2, default=str))
 
 
 def cmd_diagnose(args):
     from workstation.modules import system
     report = system.full_diagnostic()
-    system.print_diagnostic(report)
+    if not getattr(args, "json", False):
+        system.print_diagnostic(report)
     _emit(report, args, "diagnose")
 
 
 def cmd_storage(args):
     from workstation.modules import system
     report = system.storage_audit()
-    system.print_storage(report)
+    if not getattr(args, "json", False):
+        system.print_storage(report)
     _emit(report, args, "storage")
 
 
 def cmd_process(args):
     from workstation.core.process import list_processes, is_process_orphaned
     processes = []
-    print(f"\n=== Heavy Processes (>{args.threshold} MB) ===")
+    if not getattr(args, "json", False):
+        print(f"\n=== Heavy Processes (>{args.threshold} MB) ===")
     for proc in list_processes(args.threshold):
         orphaned, reason = is_process_orphaned(proc)
         item = {**proc.__dict__, "orphaned": orphaned, "reason": reason}
         processes.append(item)
-        print(f"  {proc.ram_gb:>5.2f} GB  {proc.name} PID={proc.pid}{' ORPHANED' if orphaned else ''}")
-        if proc.cmdline:
-            print(f"      {proc.cmdline}")
+        if not getattr(args, "json", False):
+            print(f"  {proc.ram_gb:>5.2f} GB  {proc.name} PID={proc.pid}{' ORPHANED' if orphaned else ''}")
+            if proc.cmdline:
+                print(f"      {proc.cmdline}")
     _emit({"processes": processes}, args, "process")
 
 
@@ -52,7 +77,7 @@ def cmd_guard(args):
         report = scan_processes(no_network=args.no_network)
     else:
         report = kill_pid(args.pid, execute=args.execute)
-    print(json.dumps(report, indent=2))
+    _print_report(report, args)
     _emit(report, args, f"guard_{args.guard_action}")
     if report.get("action") == "failed":
         raise SystemExit(1)
@@ -62,11 +87,13 @@ def cmd_git_identity(args):
     from workstation.core.git import check_all_identities, print_identity_report, fix_bad_identities
     repos = load_repos()
     audit = check_all_identities(repos)
-    print_identity_report(audit)
+    if not getattr(args, "json", False):
+        print_identity_report(audit)
     report = {"repos": [item.__dict__ for item in audit]}
     if args.fix:
         report["fix"] = fix_bad_identities(repos)
-        print(f"Fix result: {report['fix']}")
+        if not getattr(args, "json", False):
+            print(f"Fix result: {report['fix']}")
     _emit(report, args, "git_identity")
 
 
@@ -75,10 +102,12 @@ def cmd_git_worktrees(args):
     from workstation.config import load_repo_excludes
     exclude = frozenset(load_repo_excludes())
     audit = audit_all_worktrees(load_repos(), exclude)
-    print_worktree_report(audit)
+    if not getattr(args, "json", False):
+        print_worktree_report(audit)
     if args.execute:
         deleted = delete_orphaned(audit, confirm=not args.yes)
-        print(f"Deleted: {len(deleted)}")
+        if not getattr(args, "json", False):
+            print(f"Deleted: {len(deleted)}")
     report = {key: [item.__dict__ for item in value] if isinstance(value, list) else value for key, value in audit.items()}
     _emit(report, args, "worktrees")
 
@@ -86,8 +115,7 @@ def cmd_git_worktrees(args):
 def cmd_docker(args):
     from workstation.core.docker import get_state, prune_stopped, prune_images, prune_volumes
     report = get_state().__dict__
-    print("\n=== Docker ===")
-    print(json.dumps(report, indent=2))
+    _print_report(report, args)
     if args.prune:
         if not args.yes:
             raise SystemExit("Refusing cleanup without --yes.")
@@ -102,37 +130,41 @@ def cmd_docker(args):
 def cmd_docker_health(args):
     from workstation.modules.docker_health import docker_service_health
     report = docker_service_health(args.lines)
-    print("\n=== Docker Service Health ===")
-    for container in report.get("containers", []):
-        print(f"\n[{container['name']}]\n{container['state_raw']}\n--- recent logs ---\n{container['recent_logs']}")
+    if not getattr(args, "json", False):
+        print("\n=== Docker Service Health ===")
+        for container in report.get("containers", []):
+            print(f"\n[{container['name']}]\n{container['state_raw']}\n--- recent logs ---\n{container['recent_logs']}")
     _emit(report, args, "docker_health")
 
 
 def cmd_docker_logs(args):
     from workstation.modules.docker_health import docker_log_tail
     report = docker_log_tail(args.container, args.lines)
-    print(report["output"])
+    if not getattr(args, "json", False):
+        print(report["output"])
     _emit(report, args, f"docker_logs_{args.container}")
 
 
 def cmd_hermes(args):
     from workstation.modules.hermes import hermes_health, print_hermes_report
     report = hermes_health()
-    print_hermes_report(report)
+    if not getattr(args, "json", False):
+        print_hermes_report(report)
     _emit(report, args, "hermes")
 
 
 def cmd_repos(args):
     from workstation.modules.development_audit import repo_dirty_check, stale_branches, print_repo_check
     report = stale_branches() if args.stale_branches else repo_dirty_check()
-    if args.stale_branches:
-        print("\n=== Stale Local Branches ===")
-        print(f"Candidates: {report['stale_count']}")
-        for item in report["repos"]:
-            if item["merged_local_branches"]:
-                print(f"  {item['name']} ({item['default_branch']}): {', '.join(item['merged_local_branches'])}")
-    else:
-        print_repo_check(report)
+    if not getattr(args, "json", False):
+        if args.stale_branches:
+            print("\n=== Stale Local Branches ===")
+            print(f"Candidates: {report['stale_count']}")
+            for item in report["repos"]:
+                if item["merged_local_branches"]:
+                    print(f"  {item['name']} ({item['default_branch']}): {', '.join(item['merged_local_branches'])}")
+        else:
+            print_repo_check(report)
     _emit(report, args, "stale_branches" if args.stale_branches else "repos")
 
 
@@ -140,15 +172,18 @@ def cmd_toolchain(args):
     from workstation.modules.development_audit import toolchain_audit, java_home_audit, android_sdk_audit, print_toolchain
     if args.java:
         report, name = java_home_audit(), "java"
-        print("\n=== Java Home Audit ===")
-        print(json.dumps(report, indent=2))
+        if not getattr(args, "json", False):
+            print("\n=== Java Home Audit ===")
+            print(json.dumps(report, indent=2))
     elif args.android:
         report, name = android_sdk_audit(), "android_sdk"
-        print("\n=== Android SDK Audit ===")
-        print(json.dumps(report, indent=2))
+        if not getattr(args, "json", False):
+            print("\n=== Android SDK Audit ===")
+            print(json.dumps(report, indent=2))
     else:
         report, name = toolchain_audit(), "toolchain"
-        print_toolchain(report)
+        if not getattr(args, "json", False):
+            print_toolchain(report)
     _emit(report, args, name)
 
 
@@ -156,7 +191,8 @@ def cmd_toolchain(args):
 def cmd_forecast(args):
     from workstation.modules.storage_ops import disk_space_forecast, print_forecast
     report = disk_space_forecast()
-    print_forecast(report)
+    if not getattr(args, "json", False):
+        print_forecast(report)
     _emit(report, args, "disk_forecast")
 
 
@@ -164,11 +200,11 @@ def cmd_project(args):
     from workstation.modules.projects import project_status, run_project_command
     if args.project_action == "status":
         report = project_status(args.project)
-        print(json.dumps(report, indent=2))
+        _print_report(report, args)
         _emit(report, args, "project_status")
         return
     report = run_project_command(args.project, args.project_action, execute=args.execute, allow_shell=args.allow_shell)
-    print(json.dumps(report, indent=2))
+    _print_report(report, args)
     _emit(report, args, f"project_{args.project}_{args.project_action}")
     if not report.get("ok"):
         raise SystemExit(1)
@@ -182,7 +218,7 @@ def cmd_kanban(args):
         report = archive_plan(args.archive)
     else:
         report = kanban_health()
-    print(json.dumps(report, indent=2))
+    _print_report(report, args)
     _emit(report, args, f"kanban_{args.board or 'all'}")
     if not report.get("ok"): raise SystemExit(1)
 
@@ -199,7 +235,8 @@ def cmd_loc(args):
     if not project_path:
         raise SystemExit("Provide --path PATH or --project PROJECT")
     report = loc_audit(project_path, include_config=args.include_config, top=args.top)
-    print_loc(report)
+    if not getattr(args, "json", False):
+        print_loc(report)
     _emit(report, args, f"loc_{project_name or Path(project_path).name}")
     if not report.get('ok'):
         raise SystemExit(1)
@@ -210,7 +247,7 @@ def cmd_backup(args):
         report = create_backup(args.label)
     except Exception as exc:
         raise SystemExit(f"Backup blocked: {exc}")
-    print(json.dumps(report, indent=2))
+    _print_report(report, args)
     _emit(report, args, f"backup_{args.label}")
 
 
@@ -220,7 +257,7 @@ def cmd_backup_verify(args):
         report = verify_backup(args.manifest)
     except Exception as exc:
         raise SystemExit(f"Backup verification failed: {exc}")
-    print(json.dumps(report, indent=2))
+    _print_report(report, args)
     _emit(report, args, "backup_verify")
     if not report.get("ok", False): raise SystemExit(1)
 
@@ -231,7 +268,7 @@ def cmd_restore(args):
         report = plan_restore(args.manifest, allowed_roots=args.allowed_root) if args.plan else restore_backup(args.manifest, execute=args.execute, yes=args.yes, allowed_roots=args.allowed_root)
     except Exception as exc:
         raise SystemExit(str(exc))
-    print(json.dumps(report, indent=2))
+    _print_report(report, args)
     _emit(report, args, "restore")
     if not report.get('ok', True):
         raise SystemExit(1)
@@ -243,7 +280,8 @@ def cmd_hermes_maintain(args):
         report = hermes_db_maintenance(execute=args.execute, yes=args.yes, min_free_gb=args.min_free_gb)
     except Exception as exc:
         raise SystemExit(str(exc))
-    print_maintenance(report)
+    if not getattr(args, "json", False):
+        print_maintenance(report)
     _emit(report, args, "hermes_maintenance")
     if not report.get('ok'): raise SystemExit(1)
 
@@ -251,7 +289,8 @@ def cmd_hermes_maintain(args):
 def cmd_android_plan(args):
     from workstation.modules.android_cleanup import android_cleanup_plan, print_android_plan
     report = android_cleanup_plan(load_repos())
-    print_android_plan(report)
+    if not getattr(args, "json", False):
+        print_android_plan(report)
     _emit(report, args, "android_cleanup_plan")
 
 
@@ -264,12 +303,12 @@ def cmd_schedule(args):
             raise SystemExit(str(exc))
     else:
         report = schedule_plan(args.hour)
-    print(json.dumps(report, indent=2))
+    _print_report(report, args)
     _emit(report, args, "schedule")
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="workstation", description="Cross-platform workstation diagnostic and maintenance toolkit")
-    parser.add_argument("--json", action="store_true", help="Also output JSON")
+    parser.add_argument("--json", action="store_true", help="Write one JSON document to stdout; send human-readable output to stderr")
     parser.add_argument("--save-report", action="store_true", help="Write timestamped JSON and Markdown reports")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("diagnose", help="Full system diagnostic").set_defaults(func=cmd_diagnose)
@@ -312,6 +351,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    global _real_stdout
+    if getattr(args, "json", False):
+        # Keep the machine-readable document alone on standard output and move
+        # the human-readable prose to standard error.
+        _real_stdout = sys.stdout
+        sys.stdout = sys.stderr
+        try:
+            args.func(args)
+        finally:
+            sys.stdout = _real_stdout
+            _real_stdout = None
+        return
     args.func(args)
 
 

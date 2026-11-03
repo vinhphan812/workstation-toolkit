@@ -126,3 +126,49 @@ Two rules keep the site and the repository consistent:
   local checkout.
 - A new document starts from a template in `docs/templates/`, so it follows
   the house structure instead of inventing one.
+
+## Machine-readable CLI output
+
+When `--json` is passed, standard output contains exactly one JSON document;
+human-readable prose is redirected to standard error. Without `--json`,
+output remains on standard output. Cover this contract with
+`tests/test_cli_json_contract.py`.
+
+## Performance measurements
+
+- Run the committed benchmark harness on the same tree for both
+  `pathlib.rglob` and the shared `os.scandir` walker. It alternates strategy
+  order and checks that byte totals match.
+- Record the tree, platform, Python version, commit, entry count and timings.
+  Run on a clean committed tree with no other work in flight.
+- A scanner microbenchmark does not prove end-to-end speedup for a toolkit
+  command. Benchmark the exact command before making that claim.
+
+See `scripts/benchmark.py` for the repeatable scan benchmark.
+
+Example:
+
+```bash
+python scripts/benchmark.py --root src --repeats 5 --require-clean \n  --cli-command 'loc --path src' --output benchmarks/latest.json
+```
+
+### Current measured results
+
+`benchmarks/scanner-android-sdk.json` is the committed result of the release
+run. It measured the Android SDK tree on Windows 11 with CPython 3.14, on the
+committed tree `fa5c77f`, with three repeats per strategy:
+
+| Strategy | Median | Total bytes |
+|---|---|---|
+| `pathlib.rglob` | 145.44 s | 5,100,660,436 |
+| shared `os.scandir` walker | 8.49 s | 5,100,660,436 |
+
+Both strategies returned the same byte total over 194,770 entries, so the
+comparison is fair. These are owner-observed measurements of the scanner
+itself; they are not an end-to-end speedup for any toolkit command. The
+`pathlib.rglob` timings varied between 97 s and 156 s, so treat the ratio as
+indicative rather than precise.
+
+Do not quote the figures from PR #38 as an independently verified end-to-end
+speedup: those historical measurements have no committed harness and no raw
+output. Capture a clean, committed run before making that claim.

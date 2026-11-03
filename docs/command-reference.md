@@ -9,8 +9,11 @@ All commands accept the two global flags:
 
 | Flag | Effect |
 |---|---|
-| `--json` | Also print the machine-readable result to stdout |
+| `--json` | Write one JSON document to stdout; send human-readable prose to stderr |
 | `--save-report` | Write timestamped JSON and Markdown reports under `reports/` |
+
+`--json` is intended for agents and scripts: stdout can be passed directly
+to a JSON parser. Without `--json`, output remains on stdout.
 
 ## Exit codes
 

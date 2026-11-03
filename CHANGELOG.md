@@ -15,10 +15,14 @@ The reusable template for this file is
 
 ## [Unreleased]
 
+The release candidate is `0.2.0`. Move the release entries out of this section
+when preparing the final release commit immediately before pushing the tag.
+
+## [0.2.0] - 2026-11-03
+
 The entries below are selected notable changes since the initial `v0.1.0`
 release. They are grouped by type rather than listed commit by commit; test-only
-follow-ups and other routine commits are intentionally omitted. None of these
-changes has been tagged in a subsequent release.
+follow-ups and other routine commits are intentionally omitted.
 
 ### Added
 
@@ -116,6 +120,14 @@ changes has been tagged in a subsequent release.
   command line or working directory cannot be read is still reported with a
   blank value rather than being dropped, and the Windows system processes
   `Memory Compression` and `Registry` remain excluded. (`33f9e00`)
+- **Filesystem and audit scans share one walker.** A single iterative
+  traversal in `core/fsscan.py` replaces repeated recursive walks, and the
+  Android SDK and Docker sizes are computed from that one traversal instead of
+  from a second pass over the same tree. The walker skips symbolic links and
+  reparse points, tolerates unreadable entries, and applies the configured
+  path-style exclusions. Audit work over the configured repositories and
+  worktrees runs with bounded concurrency while preserving the reported
+  ordering. (`9947d9f`)
 
 ### Documentation
 
@@ -164,5 +176,6 @@ Kanban board health check, the project command runner, the backup and restore
 path, the source line-count audit, the disk forecast and the daily health
 report schedule. (`950deb0`)
 
-[Unreleased]: https://github.com/vinhphan812/workstation-toolkit/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/vinhphan812/workstation-toolkit/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/vinhphan812/workstation-toolkit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/vinhphan812/workstation-toolkit/releases/tag/v0.1.0
