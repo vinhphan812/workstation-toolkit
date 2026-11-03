@@ -16,8 +16,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 3. **Categories are fixed.** Use `Added`, `Changed`, `Deprecated`, `Removed`,
    `Fixed`, `Security`, `Performance`, `Documentation` and `Internal`. Keep a
    category only when it has entries.
-4. **Write the change, not the commit.** Describe what a user of the toolkit
-   can observe. The commit hash is appended in parentheses for traceability.
+4. **Write selected notable changes, not a commit ledger.** Describe changes
+   a user of the toolkit can observe. Routine test-only follow-ups may be
+   omitted; do not claim every commit is listed or state a commit count unless
+   the count and the full hash coverage are automatically verified. Add the
+   relevant commit hash in parentheses for traceability.
 5. **One bullet is one change.** A bullet that needs "and" is usually two
    bullets.
 6. **Link the comparison** at the foot of the file. The `[Unreleased]` link

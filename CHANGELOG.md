@@ -15,9 +15,10 @@ The reusable template for this file is
 
 ## [Unreleased]
 
-Everything below the initial release has landed since `v0.1.0` and has not
-been tagged. It is 56 commits across 19 days, and it is mostly the hardening
-of the backup, restore and worktree paths.
+The entries below are selected notable changes since the initial `v0.1.0`
+release. They are grouped by type rather than listed commit by commit; test-only
+follow-ups and other routine commits are intentionally omitted. None of these
+changes has been tagged in a subsequent release.
 
 ### Added
 
@@ -122,8 +123,11 @@ of the backup, restore and worktree paths.
   point and reaches every document, `docs/architecture.md` describes the
   layers, the dependency direction, the execution flow and the safety model
   as they are implemented, and `docs/templates/` holds the reusable
-  templates. The site is published with MkDocs and builds under `--strict`,
-  and a CI job builds it on every pull request. (`336a2bd`, and this change)
+  templates. The site is published with MkDocs and builds under `--strict`.
+  The repository's documentation tests validate relative Markdown links; the
+  strict site build checks the configured navigation and emitted pages.
+  A CI job builds the site on every pull request. (`336a2bd`, `61245be`,
+  `dd7c58f`)
 - The documentation was audited and restructured: the README gained a table
   of contents, a quick start and a command table that lists every command the
   CLI exposes, and the configuration and environment sections moved into

@@ -207,7 +207,7 @@ def test_the_changelog_template_has_been_extracted():
 
 
 def test_the_changelog_records_every_release_and_the_unreleased_work():
-    """The changelog keeps the Keep a Changelog structure."""
+    """The changelog keeps its release structure and accurately scopes the list."""
     changelog = _read(CHANGELOG)
     versions = re.findall(r"^## \[(.+?)\]", changelog, re.M)
     assert "Unreleased" in versions, "the changelog must have an Unreleased section"
@@ -220,6 +220,30 @@ def test_the_changelog_records_every_release_and_the_unreleased_work():
         "a released version must carry its release date")
     assert re.search(r"^## \[Unreleased\]$", changelog, re.M), (
         "the unreleased section must not carry a date")
+
+
+def test_the_changelog_does_not_claim_complete_commit_coverage():
+    """A selected-change log must not imply a complete commit ledger."""
+    changelog = _read(CHANGELOG).lower()
+    assert "selected notable changes" in changelog, (
+        "the unreleased section must identify its entries as selected notable changes")
+    assert not re.search(r"\b\d+ commits? across \d+ days?\b", changelog), (
+        "do not state a commit/day total unless full commit coverage is verified")
+    for unsupported_claim in (
+        "every commit", "all commits", "every non-merge commit",
+    ):
+        assert unsupported_claim not in changelog, (
+            f"the changelog makes an unsupported completeness claim: {unsupported_claim}")
+
+
+def test_unreleased_changelog_has_no_unexplained_current_pr_placeholders():
+    """Current changelog entries must not use vague or non-resolving attribution."""
+    changelog = _read(CHANGELOG)
+    unreleased = changelog.split("## [0.1.0]", 1)[0]
+    assert "and this change" not in unreleased.lower(), (
+        "use the actual commit hash rather than 'and this change'")
+    assert not re.search(r"`(?:HEAD|WORKTREE|PR)`", unreleased), (
+        "use an existing commit hash rather than a symbolic placeholder")
 
 
 def test_the_architecture_document_names_only_files_that_exist():

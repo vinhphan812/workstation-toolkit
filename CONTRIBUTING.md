@@ -89,9 +89,10 @@ the documentation in the same pull request:
 | A module, layer or safety gate | `docs/architecture.md` |
 | A release or workflow policy | `README.md`, `CHANGELOG.md` |
 
-Every new document is added to `docs/index.md`, and every document listed in
-`docs/index.md` is reachable from it. The documentation index is the single
-entry point, so a document that no index reaches cannot be found.
+Every new document is added to `docs/index.md`, and every document listed
+in `docs/index.md` is reachable from it. The documentation index is the single
+entry point, so a document that no index reaches cannot be found. Documents
+in `docs/templates/` are indexed by `docs/templates/index.md`.
 
 ### Style
 
@@ -113,8 +114,11 @@ in `docs/` together with `README.md`, `CHANGELOG.md` and `CONTRIBUTING.md`.
 uv run --with mkdocs --with mkdocs-material mkdocs build --strict
 ```
 
-`--strict` turns a warning into an error, so the build fails on a navigation
-entry that points at a missing page or on a link that does not resolve.
+`--strict` turns a navigation or page warning into a build error. The
+repository's documentation tests validate relative Markdown links, including
+the root documents that are not part of the MkDocs site build. MkDocs is
+configured to ignore not-found links because links to root documents are
+intended to resolve on GitHub rather than on the published site.
 
 Two rules keep the site and the repository consistent:
 
