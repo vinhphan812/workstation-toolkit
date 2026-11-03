@@ -1,5 +1,6 @@
 """Docker inspection — calls docker CLI, cross-platform."""
 import subprocess, json, os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List
 
@@ -32,39 +33,69 @@ def get_state() -> DockerState:
                            stopped_count=0, images_size="N/A", volumes_count=0,
                            build_cache="N/A", vhdx_gb=0.0, error=stdout)
 
-    # Running containers
-    stdout, _ = _run("ps", "--format", "{{.Names}}")
+    # The remaining Docker calls are independent of each other, and the
+    # slowest one by far is `docker system df`: it walks the whole image and
+    # build cache and took 15 seconds on this machine. The previous code ran
+    # `system df` twice (once formatted for the image size, once for the build
+    # cache) and every other call sequentially, so the state probe cost 25
+    # seconds. One plain `system df` supplies both values, and the rest of the
+    # calls now run concurrently.
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        running_future = pool.submit(_run, "ps", "--format", "{{.Names}}")
+        stopped_future = pool.submit(_run, "ps", "-a", "--filter", "status=exited",
+                                      "--format", "{{.Names}}")
+        images_future = pool.submit(_run, "images", "--format", "{{.Repository}}:{{.Tag}}")
+        volumes_future = pool.submit(_run, "volume", "ls", "--format", "{{.Name}}")
+        df_future = pool.submit(_run, "system", "df")
+
+    stdout, _ = running_future.result()
     running_names = [n for n in stdout.splitlines() if n.strip()]
     containers = len(running_names)
 
-    # Stopped containers
-    stdout, _ = _run("ps", "-a", "--filter", "status=exited", "--format", "{{.Names}}")
+    stdout, _ = stopped_future.result()
     stopped_count = len([n for n in stdout.splitlines() if n.strip()])
 
-    # Images size
-    stdout, _ = _run("images", "--format", "{{.Repository}}:{{.Tag}}")
-    # Total size via system df
-    df_out, _ = _run("system", "df", "--format", "{{.Size}}")
-    images_size = "N/A"
-    for line in df_out.splitlines():
-        if "Images" in line or line.startswith("Images"):
-            parts = line.split()
-            if len(parts) >= 2:
-                images_size = parts[1] if len(parts) > 1 else parts[-1]
-            break
+    stdout, _ = images_future.result()
 
-    # Volumes count
-    stdout, _ = _run("volume", "ls", "--format", "{{.Name}}")
+    stdout, _ = volumes_future.result()
     volumes_count = len([v for v in stdout.splitlines() if v.strip()])
 
-    # Build cache
+    # One `system df` reports both the image size and the build cache. The
+    # table form is used rather than `--format`: on Docker Desktop for
+    # Windows the formatted variant fails with a containerd snapshotter
+    # error, while the plain table succeeds.
+    #
+    # The table rows are not fixed width. The TYPE label can be one word
+    # ("Images") or two ("Build Cache", "Local Volumes"), and RECLAIMABLE is
+    # either one field ("0B") or two ("0B (0%)"). The SIZE column is the
+    # first field after TYPE, TOTAL and ACTIVE that carries a size unit,
+    # and TOTAL and ACTIVE are always plain counts, so the size is the
+    # first field that is not a bare integer.
+    df_out, _ = df_future.result()
+    images_size = "N/A"
     build_cache = "N/A"
-    stdout, _ = _run("system", "df")
-    for line in stdout.splitlines():
-        if "Build" in line:
-            parts = line.split()
-            build_cache = parts[-1] if parts else "N/A"
+    for line in df_out.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        # The label may be two words, so it is read as everything before the
+        # numeric columns rather than as a single field.
+        label = " ".join(parts[:2]).lower()
+        # Skip the header row.
+        if label.startswith("type"):
+            continue
+        size = None
+        for candidate in parts[2:]:
+            if candidate.isdigit():
+                continue
+            size = candidate
             break
+        if size is None:
+            continue
+        if label.startswith("images") and images_size == "N/A":
+            images_size = size
+        elif label.startswith("build cache") and build_cache == "N/A":
+            build_cache = size
 
     # VHDX size (Windows only)
     vhdx_gb = 0.0

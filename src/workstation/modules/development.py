@@ -1,12 +1,12 @@
 """Development environment modules."""
 from workstation.core.git import check_all_identities, fix_bad_identities
 from workstation.core.worktree import audit_all_worktrees
-from workstation.config import load_repos
+from workstation.config import load_repo_excludes, load_repos
 
 def full_dev_audit() -> dict:
     repos = load_repos()
     identities = check_all_identities(repos)
-    worktrees = audit_all_worktrees(repos)
+    worktrees = audit_all_worktrees(repos, frozenset(load_repo_excludes()))
     return {
         "repos_scanned": len(repos),
         "bad_identities": [r for r in identities if r.is_bad],

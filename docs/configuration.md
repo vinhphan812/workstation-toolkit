@@ -44,8 +44,17 @@ introduced into the toolkit.
 | `repos` | list of strings | Absolute paths to the repositories to audit |
 | `exclude_patterns` | list of strings | Directory names skipped while walking a repository |
 
-`exclude_patterns` matches directory names, not path fragments, so `.venv`
-excludes any directory called `.venv` at any depth.
+The first component of every entry is matched at any depth. For example,
+`.venv` excludes every directory called `.venv`, and `node_modules/.cache`
+excludes directories called `node_modules`. An entry that is a path is
+reduced to its first component because the size scan must skip the parent
+tree to avoid walking the expensive dependency contents.
+
+The exclusions apply to the `git-worktrees` audit, where they keep the
+dependency and build trees of the worktrees Git still knows about out of
+the size calculation. A worktree Git no longer knows about is an orphan,
+and its size is always measured in full: that figure states how much space
+deleting it would reclaim, so it must not be under-reported.
 
 A missing `repos.json` is not an error. The repository-scoped commands then
 report that no repositories are configured.

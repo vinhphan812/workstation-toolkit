@@ -16,7 +16,7 @@ def test_git_worktrees_command_is_read_only_by_default(tmp_path, monkeypatch, ca
     import workstation.core.worktree as worktree
 
     monkeypatch.setattr(cli, "load_repos", lambda: [str(tmp_path)])
-    monkeypatch.setattr(worktree, "audit_all_worktrees", lambda _repos: {
+    monkeypatch.setattr(worktree, "audit_all_worktrees", lambda _repos, _exclude=(): {
         "orphaned": [], "known": [], "locked": [], "errors": {},
         "total_orphaned_size_mb": 0,
     })

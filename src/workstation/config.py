@@ -20,6 +20,37 @@ def load_repos():
             return j.get("repos", [])
     return []
 
+def load_repo_excludes() -> list[str]:
+    """Return the directory names excluded while walking a repository.
+
+    These are the names listed under ``exclude_patterns`` in ``repos.json``.
+    They match a directory name at any depth, so ``.venv`` excludes every
+    directory called ``.venv`` in the tree.
+
+    An entry that is a path rather than a plain name, such as
+    ``node_modules/.cache``, is reduced to its first component. Excluding
+    ``node_modules/.cache`` only makes sense if the walk does not descend
+    into ``node_modules`` in the first place, and the dependency tree
+    inside it is the expensive part to walk.
+    """
+    path = Path(CONFIG_DIR) / "repos.json"
+    if path.exists():
+        try:
+            with open(path) as f:
+                j = json.load(f)
+        except (OSError, ValueError):
+            return []
+        patterns = j.get("exclude_patterns", [])
+        if isinstance(patterns, list):
+            names = []
+            for pattern in patterns:
+                text = str(pattern).replace("\\", "/").strip("/")
+                if not text:
+                    continue
+                names.append(text.split("/", 1)[0])
+            return names
+    return []
+
 def load_projects():
     path = Path(CONFIG_DIR) / "projects.json"
     if path.exists():
