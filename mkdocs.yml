@@ -7,6 +7,7 @@ site_author: Vinh Phan
 repo_url: https://github.com/vinhphan812/workstation-toolkit
 repo_name: vinhphan812/workstation-toolkit
 edit_uri: edit/main/docs/
+site_url: https://vinhphan812.github.io/workstation-toolkit/
 
 docs_dir: docs
 site_dir: site

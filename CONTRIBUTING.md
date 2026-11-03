@@ -126,3 +126,35 @@ Two rules keep the site and the repository consistent:
   local checkout.
 - A new document starts from a template in `docs/templates/`, so it follows
   the house structure instead of inventing one.
+
+## Machine-readable CLI output
+
+When `--json` is passed, standard output contains exactly one JSON document;
+human-readable prose is redirected to standard error. Without `--json`,
+output remains on standard output. Cover this contract with
+`tests/test_cli_json_contract.py`.
+
+## Performance measurements
+
+- Run the committed benchmark harness on the same tree for both
+  `pathlib.rglob` and the shared `os.scandir` walker. It alternates strategy
+  order and checks that byte totals match.
+- Record the tree, platform, Python version, commit, entry count and timings.
+  Run on a clean committed tree with no other work in flight.
+- A scanner microbenchmark does not prove end-to-end speedup for a toolkit
+  command. Benchmark the exact command before making that claim.
+
+See `scripts/benchmark.py` for the repeatable scan benchmark.
+
+Example:
+
+```bash
+python scripts/benchmark.py --root src --repeats 5 --require-clean \n  --cli-command 'loc --path src' --output benchmarks/latest.json
+```
+
+### Current measured results
+
+No release benchmark has been recorded yet. Do not quote the figures from
+PR #38 as an independently verified end-to-end speedup: those historical
+measurements do not have a committed harness and raw output. Capture a clean,
+committed run before making any quantitative release claim.

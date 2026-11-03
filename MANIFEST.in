@@ -1,0 +1,13 @@
+# The source distribution carries the material a reviewer or a consumer needs
+# to verify the release: the changelog, the contribution rules, the
+# documentation sources, the benchmark harness and the site configuration.
+include CHANGELOG.md
+include CONTRIBUTING.md
+include README.md
+include LICENSE
+include mkdocs.yml
+recursive-include docs *.md
+recursive-include scripts *.py
+recursive-include tests *.py
+global-exclude __pycache__
+global-exclude *.py[cod]

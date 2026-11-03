@@ -12,7 +12,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 1. **Every release gets a section.** The section heading is `## [X.Y.Z] - YYYY-MM-DD`,
    with the release date in ISO 8601 format.
 2. **Unreleased work stays under `## [Unreleased]`.** Move an entry into a
-   release section when the tag is pushed, never before.
+   release section when the release commit is prepared immediately before the
+   tag is pushed, never earlier.
 3. **Categories are fixed.** Use `Added`, `Changed`, `Deprecated`, `Removed`,
    `Fixed`, `Security`, `Performance`, `Documentation` and `Internal`. Keep a
    category only when it has entries.
