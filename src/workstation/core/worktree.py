@@ -1,7 +1,10 @@
 """Git worktree audit — cross-platform."""
 import subprocess, os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List
+
+from workstation.core.fsscan import dir_size_mb
 
 # Lock states. `is_locked` alone cannot express "we have no evidence", so the
 # audit reports one of three states instead of guessing.
@@ -47,20 +50,16 @@ def _run_git(repo: str, *args) -> tuple[str, int]:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return "", 1
 
-def _dir_size(path: str) -> float:
-    total = 0
-    try:
-        for entry in os.scandir(path):
-            try:
-                if entry.is_file():
-                    total += entry.stat().st_size
-                elif entry.is_dir():
-                    total += _dir_size(entry.path)
-            except (PermissionError, OSError):
-                pass
-    except (PermissionError, OSError):
-        pass
-    return total / (1024**2)
+def _dir_size(path: str, exclude: frozenset[str] = frozenset()) -> float:
+    """Return the size of *path* in megabytes.
+
+    Delegates to the shared scanner: the previous implementation called
+    ``entry.is_file()`` and then ``entry.stat()`` for every entry, which on
+    Windows costs two syscalls per file because ``is_file()`` is not served
+    from the ``FindFileData`` cache. Auditing 401 worktrees that way cost
+    923,830 scandir calls and 258 seconds of runtime.
+    """
+    return dir_size_mb(path, exclude)
 
 def get_git_worktrees(repo: str) -> dict:
     """Return normalized worktree-path -> branch from Git porcelain output."""
@@ -133,19 +132,58 @@ def _probe_lock_state(path: str) -> str:
         return LOCK_UNKNOWN
 
 
-def audit_repo_worktrees(repo: str) -> List[WorktreeInfo]:
-    """Audit worktrees for a single repo."""
+def _measure_worktrees(paths: List[str], exclude: frozenset[str]) -> List[float]:
+    """Return the size in megabytes of each path, measured concurrently.
+
+    One flat pool is used for the whole audit. Nesting a pool per
+    repository inside a pool over repositories produced 64 concurrent
+    directory walks on a single disk, which was slower than the sequential
+    version it replaced.
+    """
+    if not paths:
+        return []
+
+    def measure(path: str) -> float:
+        return round(_dir_size(path, exclude), 2)
+
+    with ThreadPoolExecutor(max_workers=min(8, len(paths))) as pool:
+        return list(pool.map(measure, paths))
+
+
+def audit_repo_worktrees(repo: str, exclude: frozenset[str] = frozenset()) -> List[WorktreeInfo]:
+    """Audit worktrees for a single repo.
+
+    Directory names in *exclude* are skipped when measuring the worktrees.
+    """
     wt_dir = os.path.join(repo, ".worktrees")
     if not os.path.isdir(wt_dir):
         return []
 
     known = get_git_worktrees(repo)
+    try:
+        with os.scandir(wt_dir) as scan:
+            candidates = [entry.path for entry in scan if entry.is_dir()]
+    except OSError:
+        candidates = []
+
+    # Measuring each worktree means walking its whole tree. With hundreds of
+    # worktrees across the configured repositories that dominated the audit,
+    # so the walks run concurrently. The work is I/O bound on the filesystem,
+    # which is exactly the case where threads help.
+    #
+    # Known worktrees are informational and can skip excluded dependency
+    # trees. Orphans report reclaimable space and must be measured in full.
+    known_paths = [
+        path for path in candidates
+        if os.path.normcase(os.path.normpath(path)) in known
+    ]
+    orphan_paths = [path for path in candidates if path not in known_paths]
+    sizes_by_path = dict(zip(known_paths, _measure_worktrees(known_paths, exclude)))
+    sizes_by_path.update(zip(orphan_paths, _measure_worktrees(orphan_paths, frozenset())))
+
     results = []
-    for entry in os.scandir(wt_dir):
-        if not entry.is_dir():
-            continue
-        path = entry.path
-        size_mb = round(_dir_size(path), 2)
+    for path in candidates:
+        size_mb = sizes_by_path.get(path, 0.0)
         normalized_path = os.path.normcase(os.path.normpath(path))
         branch = known.get(normalized_path, "unknown")
         is_known = normalized_path in known
@@ -170,23 +208,99 @@ def audit_repo_worktrees(repo: str) -> List[WorktreeInfo]:
         ))
     return results
 
-def audit_all_worktrees(repos: List[str]) -> dict:
-    """Audit worktrees across all repos. Returns summary dict."""
+def audit_all_worktrees(repos: List[str], exclude: frozenset[str] = frozenset()) -> dict:
+    """Audit worktrees across all repos. Returns summary dict.
+
+    *exclude* lists directory names that are skipped when measuring a
+    worktree that Git still knows about. Those worktrees are only listed in
+    the report, so their size is informational and the excluded build and
+    dependency trees do not have to be walked.
+
+    A worktree that Git no longer knows about is an orphan, and the report
+    states how much space deleting it would reclaim. That size is always
+    measured in full, because an under-reported reclaim figure would
+    mislead the decision to delete.
+    """
     orphaned, known, locked, lock_unknown, errors = [], [], [], [], {}
-    for repo in repos:
+
+    def collect(repo: str) -> tuple[str, dict, List[str], str | None]:
+        """Read the worktree registration and the candidate directories."""
         try:
-            wts = audit_repo_worktrees(repo)
-            for wt in wts:
-                if wt.is_known:
-                    known.append(wt)
-                elif wt.is_locked:
-                    locked.append(wt)
-                else:
-                    orphaned.append(wt)
-                    if wt.lock_state == LOCK_UNKNOWN:
-                        lock_unknown.append(wt)
-        except Exception as e:
-            errors[repo] = str(e)
+            wt_dir = os.path.join(repo, ".worktrees")
+            if not os.path.isdir(wt_dir):
+                return repo, {}, [], None
+            known_map = get_git_worktrees(repo)
+            with os.scandir(wt_dir) as scan:
+                candidates = [entry.path for entry in scan if entry.is_dir()]
+            return repo, known_map, candidates, None
+        except Exception as exc:
+            return repo, {}, [], str(exc)
+
+    # The Git queries and the directory listing are cheap, so they run
+    # concurrently across the repositories.
+    with ThreadPoolExecutor(max_workers=min(8, len(repos) or 1)) as pool:
+        collected = list(pool.map(collect, repos))
+
+    def is_known_path(known_map: dict, path: str) -> bool:
+        return os.path.normcase(os.path.normpath(path)) in known_map
+
+    # Known worktrees are measured with the exclusions applied, orphans are
+    # measured in full. Both groups are walked by one flat pool: nesting a
+    # pool per repository inside a pool over repositories produced 64
+    # concurrent walks on a single disk and was slower than the sequential
+    # version it replaced.
+    known_paths: List[str] = []
+    orphan_paths: List[str] = []
+    for _repo, known_map, candidates, error in collected:
+        if error is not None:
+            continue
+        for path in candidates:
+            if is_known_path(known_map, path):
+                known_paths.append(path)
+            else:
+                orphan_paths.append(path)
+
+    known_sizes = _measure_worktrees(known_paths, exclude)
+    orphan_sizes = _measure_worktrees(orphan_paths, frozenset())
+
+    sizes_by_path = dict(zip(known_paths, known_sizes))
+    sizes_by_path.update(zip(orphan_paths, orphan_sizes))
+
+    for repo, known_map, candidates, error in collected:
+        if error is not None:
+            errors[repo] = error
+            continue
+        for path in candidates:
+            size_mb = sizes_by_path.get(path, 0.0)
+            normalized_path = os.path.normcase(os.path.normpath(path))
+            branch = known_map.get(normalized_path, "unknown")
+            is_known = normalized_path in known_map
+
+            # Lock state cannot be inferred from a directory probe: rmdir is
+            # destructive for empty paths and fails for every nonempty path.
+            # Use a read-only, platform-specific probe instead, and report
+            # LOCK_UNKNOWN where no reliable evidence exists.
+            lock_state = _probe_lock_state(path)
+            is_locked = lock_state == LOCK_LOCKED
+
+            wt = WorktreeInfo(
+                path=path,
+                repo=repo,
+                is_known=is_known,
+                is_orphaned=not is_known,
+                is_locked=is_locked,
+                size_mb=size_mb,
+                branch=branch,
+                lock_state=lock_state,
+            )
+            if wt.is_known:
+                known.append(wt)
+            elif wt.is_locked:
+                locked.append(wt)
+            else:
+                orphaned.append(wt)
+                if wt.lock_state == LOCK_UNKNOWN:
+                    lock_unknown.append(wt)
     return {
         "orphaned": orphaned,
         "known": known,

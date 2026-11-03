@@ -3,6 +3,8 @@ import shutil, os
 from dataclasses import dataclass
 from typing import List
 
+from workstation.core.fsscan import dir_size_bytes
+
 @dataclass
 class DiskInfo:
     path: str
@@ -53,16 +55,10 @@ def get_large_items(top_dir: str, min_mb: int = 50, limit: int = 10) -> List[dic
     return items[:limit]
 
 def _dir_size(path: str) -> float:
-    total = 0
-    try:
-        for entry in os.scandir(path):
-            try:
-                if entry.is_file(follow_symlinks=False):
-                    total += entry.stat().st_size
-                elif entry.is_dir(follow_symlinks=False):
-                    total += _dir_size(entry.path)
-            except (PermissionError, OSError):
-                pass
-    except (PermissionError, OSError):
-        pass
-    return total
+    """Return the total size in bytes of every file under *path*.
+
+    Delegates to the shared scanner: the recursive version called
+    ``is_file()`` and then ``stat()`` per entry, which costs two syscalls
+    per file on Windows.
+    """
+    return dir_size_bytes(path)

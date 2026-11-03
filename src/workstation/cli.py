@@ -72,7 +72,9 @@ def cmd_git_identity(args):
 
 def cmd_git_worktrees(args):
     from workstation.core.worktree import audit_all_worktrees, print_worktree_report, delete_orphaned
-    audit = audit_all_worktrees(load_repos())
+    from workstation.config import load_repo_excludes
+    exclude = frozenset(load_repo_excludes())
+    audit = audit_all_worktrees(load_repos(), exclude)
     print_worktree_report(audit)
     if args.execute:
         deleted = delete_orphaned(audit, confirm=not args.yes)

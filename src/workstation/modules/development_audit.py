@@ -1,9 +1,11 @@
 """Developer workstation audits: repo hygiene, toolchains, Java and Android SDK."""
 from __future__ import annotations
 import os, re, shutil, subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from workstation.config import load_repos
-from workstation.core.git import is_repo_dirty, get_repo_branches, get_remotes
+from workstation.core.git import get_repo_summary, is_repo_dirty, get_repo_branches, get_remotes
+from workstation.core.fsscan import dir_size_bytes, dir_size_by_child_levels
 
 
 def _run(*args: str, timeout: int = 20) -> tuple[str, int]:
@@ -15,36 +17,51 @@ def _run(*args: str, timeout: int = 20) -> tuple[str, int]:
 
 
 def repo_dirty_check() -> dict:
-    entries = []
-    for repo in load_repos():
-        if not Path(repo, ".git").exists():
-            continue
-        entries.append({
+    repos = [repo for repo in load_repos() if Path(repo, ".git").exists()]
+
+    def inspect(repo: str) -> dict:
+        summary = get_repo_summary(repo)
+        return {
             "name": Path(repo).name,
             "path": repo,
-            "dirty": is_repo_dirty(repo),
-            "branches": get_repo_branches(repo),
-            "remotes": get_remotes(repo),
-        })
+            "dirty": summary["dirty"],
+            "branches": summary["branches"],
+            "remotes": summary["remotes"],
+        }
+
+    # Each repository costs three Git child processes and the parent spends
+    # all of that time waiting, so the repositories are inspected
+    # concurrently. Report order follows the configured order.
+    with ThreadPoolExecutor(max_workers=min(8, len(repos) or 1)) as pool:
+        entries = list(pool.map(inspect, repos))
+
     return {"repos": entries, "dirty_count": sum(item["dirty"] for item in entries)}
 
 
 def stale_branches() -> dict:
     """Report local branches already merged into the repo default branch."""
-    entries = []
-    for repo in load_repos():
-        if not Path(repo, ".git").exists():
-            continue
+    repos = [repo for repo in load_repos() if Path(repo, ".git").exists()]
+
+    def inspect(repo: str) -> dict | None:
         out, code = _run("git", "-C", repo, "branch", "--merged")
         if code:
-            continue
+            return None
         default = "master"
         branch_out, _ = _run("git", "-C", repo, "symbolic-ref", "refs/remotes/origin/HEAD", "--short")
         if branch_out.startswith("origin/"):
             default = branch_out.split("/", 1)[1]
         merged = [line.replace("*", "").strip() for line in out.splitlines()]
         candidates = [branch for branch in merged if branch and branch != default]
-        entries.append({"name": Path(repo).name, "path": repo, "default_branch": default, "merged_local_branches": candidates})
+        return {"name": Path(repo).name, "path": repo, "default_branch": default,
+                "merged_local_branches": candidates}
+
+    # The per-repo work is dominated by waiting for the Git child process, so
+    # running the repositories concurrently is a genuine win rather than
+    # contention. Ordering of the report is preserved.
+    with ThreadPoolExecutor(max_workers=min(8, len(repos) or 1)) as pool:
+        inspected = list(pool.map(inspect, repos))
+
+    entries = [item for item in inspected if item is not None]
     return {"repos": entries, "stale_count": sum(len(item["merged_local_branches"]) for item in entries)}
 
 
@@ -91,26 +108,50 @@ def android_sdk_audit() -> dict:
     root = Path(sdk)
     if not root.is_dir():
         return {"status": "unavailable", "reason": "ANDROID_SDK_ROOT not found", "sdk_root": sdk}
+
+    # One traversal of the SDK yields both the total and the size of every
+    # package directory. The previous implementation measured the root and
+    # then re-walked build-tools, platforms, emulator and system-images,
+    # repeating roughly a quarter of the whole SDK.
+    levels = dir_size_by_child_levels(root, (1, 2))
+    depth1, depth2 = levels[1], levels[2]
+
     def dirs(name: str) -> list[dict]:
         base = root / name
         if not base.is_dir():
             return []
-        return [{"name": item.name, "path": str(item), "size_mb": round(_dir_size(item) / (1024**2), 2)} for item in base.iterdir() if item.is_dir()]
+        entries = []
+        for item in sorted(base.iterdir()):
+            if not item.is_dir():
+                continue
+            key = f"{name}{os.sep}{item.name}"
+            entries.append({
+                "name": item.name,
+                "path": str(item),
+                "size_mb": round(depth2.get(key, 0) / (1024 ** 2), 2),
+            })
+        return entries
+
+    families = {
+        "build_tools": dirs("build-tools"),
+        "platforms": dirs("platforms"),
+        "emulators": dirs("emulator"),
+        "system_images": dirs("system-images"),
+    }
+    total_mb = round(sum(depth1.values()) / (1024 ** 2), 2)
     return {
-        "status": "available", "sdk_root": str(root), "total_mb": round(_dir_size(root) / (1024**2), 2),
-        "build_tools": dirs("build-tools"), "platforms": dirs("platforms"), "emulators": dirs("emulator"), "system_images": dirs("system-images"),
+        "status": "available", "sdk_root": str(root), "total_mb": total_mb,
+        **families,
     }
 
 
 def _dir_size(path: Path) -> int:
-    total = 0
-    try:
-        for item in path.rglob("*"):
-            try:
-                if item.is_file(): total += item.stat().st_size
-            except OSError: pass
-    except OSError: pass
-    return total
+    """Return the size in bytes of every file under *path*.
+
+    Kept as a module-level name because the audit helpers below call it and
+    because the test suite patches it.
+    """
+    return dir_size_bytes(path)
 
 
 def print_repo_check(report: dict) -> None:

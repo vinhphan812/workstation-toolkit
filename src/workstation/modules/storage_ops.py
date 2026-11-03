@@ -4,6 +4,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from workstation.core.disk import get_disk_info
+from workstation.core.fsscan import dir_size_bytes
 from workstation.config import get_hermes_profile
 
 
@@ -68,14 +69,13 @@ def _windows_roots() -> list[Path]:
 
 
 def _tree_size(path: Path) -> int:
-    total = 0
-    try:
-        for item in path.rglob('*'):
-            try:
-                if item.is_file(): total += item.stat().st_size
-            except OSError: pass
-    except OSError: pass
-    return total
+    """Return the total size in bytes of every file under *path*.
+
+    Uses the shared scanner rather than ``Path.rglob``, which cost two
+    syscalls per file on Windows and made ``forecast`` spend 68 seconds
+    walking the Android SDK.
+    """
+    return dir_size_bytes(path)
 
 
 def print_forecast(report: dict) -> None:

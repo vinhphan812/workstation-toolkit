@@ -125,6 +125,22 @@ def get_remotes(repo: str) -> List[str]:
     ))
 
 
+def get_repo_summary(repo: str) -> dict:
+    """Return dirty state, local branches and remotes for one repository.
+
+    This helper keeps the three checks used by the report together. The
+    caller runs repository summaries concurrently because each check waits
+    for a Git child process; the checks themselves retain their independent
+    error handling and match the legacy helpers below.
+
+    Any value may be empty when Git fails or the path is not a repository.
+    """
+    dirty = is_repo_dirty(repo)
+    branches = get_repo_branches(repo)
+    remotes = get_remotes(repo)
+    return {"dirty": dirty, "branches": branches, "remotes": remotes}
+
+
 def print_identity_report(results: List[RepoIdentity]) -> None:
     """Print local Git identity overrides and flag dangerous values."""
     bad = [item for item in results if item.is_bad]
