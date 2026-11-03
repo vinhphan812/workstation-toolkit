@@ -87,3 +87,23 @@ def test_the_source_distribution_carries_the_tests(artefacts):
     names = tarfile.open(sdist).getnames()
     tests = [name for name in names if "/tests/" in name and name.endswith(".py")]
     assert len(tests) >= 28, f"unexpected test count: {len(tests)}"
+
+
+def test_the_committed_benchmark_result_is_internally_consistent():
+    """The recorded measurement must agree with itself."""
+    result = ROOT / "benchmarks" / "scanner-android-sdk.json"
+    if not result.exists():
+        pytest.skip("no benchmark result has been recorded")
+    import json
+    document = json.loads(result.read_text(encoding="utf-8"))
+    scan = document["scan"]
+    assert scan["totals_match"] is True
+    strategies = scan["strategies"]
+    totals = {name: item["total_bytes"] for name, item in strategies.items()}
+    assert len(set(totals.values())) == 1, (
+        "the recorded strategies must report the same byte total")
+    for name, item in strategies.items():
+        assert item["seconds_median"] > 0
+        assert item["seconds_min"] <= item["seconds_median"] <= item["seconds_max"]
+    assert document["environment"]["git_commit"], (
+        "the measurement must record the commit it ran against")

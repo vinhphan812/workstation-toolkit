@@ -154,7 +154,21 @@ python scripts/benchmark.py --root src --repeats 5 --require-clean \n  --cli-com
 
 ### Current measured results
 
-No release benchmark has been recorded yet. Do not quote the figures from
-PR #38 as an independently verified end-to-end speedup: those historical
-measurements do not have a committed harness and raw output. Capture a clean,
-committed run before making any quantitative release claim.
+`benchmarks/scanner-android-sdk.json` is the committed result of the release
+run. It measured the Android SDK tree on Windows 11 with CPython 3.14, on the
+committed tree `fa5c77f`, with three repeats per strategy:
+
+| Strategy | Median | Total bytes |
+|---|---|---|
+| `pathlib.rglob` | 145.44 s | 5,100,660,436 |
+| shared `os.scandir` walker | 8.49 s | 5,100,660,436 |
+
+Both strategies returned the same byte total over 194,770 entries, so the
+comparison is fair. These are owner-observed measurements of the scanner
+itself; they are not an end-to-end speedup for any toolkit command. The
+`pathlib.rglob` timings varied between 97 s and 156 s, so treat the ratio as
+indicative rather than precise.
+
+Do not quote the figures from PR #38 as an independently verified end-to-end
+speedup: those historical measurements have no committed harness and no raw
+output. Capture a clean, committed run before making that claim.

@@ -1,0 +1,53 @@
+{
+  "environment": {
+    "timestamp_utc": "2026-11-03T14:15:27.723715+00:00",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "machine": "AMD64",
+    "processor": "AMD64 Family 23 Model 96 Stepping 1, AuthenticAMD",
+    "python_version": "3.14.3",
+    "python_implementation": "CPython",
+    "cpu_count": 16,
+    "git_commit": "fa5c77f0cecb07e48355b21a4cb2d1c50c1ee282",
+    "git_dirty": false
+  },
+  "scan": {
+    "root": "C:\\Users\\Admin\\AppData\\Local\\Android\\Sdk",
+    "entries": 194770,
+    "repeats": 3,
+    "totals_match": true,
+    "strategies": {
+      "pathlib_rglob": {
+        "total_bytes": 5100660436,
+        "seconds_min": 97.0876,
+        "seconds_median": 145.4359,
+        "seconds_max": 155.8136
+      },
+      "shared_scandir": {
+        "total_bytes": 5100660436,
+        "seconds_min": 5.1167,
+        "seconds_median": 8.4921,
+        "seconds_max": 9.2826
+      }
+    }
+  },
+  "cli": [
+    {
+      "command": "workstation loc --path src",
+      "repeats": 3,
+      "exit_codes": [
+        0,
+        0,
+        0
+      ],
+      "seconds_min": 0.2874,
+      "seconds_median": 0.2912,
+      "seconds_max": 0.383
+    }
+  ],
+  "notes": [
+    "Run on a committed tree with no other work in flight.",
+    "The scanner timings are a same-tree microbenchmark; they do not prove an end-to-end speedup for a toolkit command.",
+    "The harness and raw output are committed, so another person can repeat the measurement.",
+    "A wall-clock timing alone does not attribute the time to this code; compare the median against a profile when the two disagree."
+  ]
+}
