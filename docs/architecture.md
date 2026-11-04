@@ -334,11 +334,11 @@ The source tree at the time of writing:
 
 | Tree | Files | Lines |
 |---|---|---|
-| `src/workstation/` | 34 | 4656 |
+| `src/workstation/` | 34 | 4677 |
 | `src/workstation/core/` | 11 | 2527 |
-| `src/workstation/modules/` | 14 | 1515 |
+| `src/workstation/modules/` | 14 | 1536 |
 | `src/workstation/adapters/` | 5 | 161 |
-| `tests/` | 28 | 4216 |
+| `tests/` | 29 | 4382 |
 
 ## Related
 
