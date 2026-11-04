@@ -41,7 +41,7 @@ def _count_file(path: Path, language: str) -> dict:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        return {"total": 0, "blank": 0, "comment": 0, "code": 0}
+        return {"total": 0, "blank": 0, "comment": 0, "code": 0, "bytes": 0}
     prefixes = COMMENT_PREFIXES.get(language, ())
     blank = comment = 0
     for line in lines:
@@ -50,7 +50,22 @@ def _count_file(path: Path, language: str) -> dict:
             blank += 1
         elif prefixes and stripped.startswith(prefixes):
             comment += 1
-    return {"total": len(lines), "blank": blank, "comment": comment, "code": len(lines) - blank - comment}
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    return {"total": len(lines), "blank": blank, "comment": comment,
+            "code": len(lines) - blank - comment, "bytes": size}
+
+
+def _human_bytes(size: int) -> str:
+    """Render a byte count in the unit a reader can judge at a glance."""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:,.0f} {unit}" if unit == "B" else f"{value:,.1f} {unit}"
+        value /= 1024
+    return f"{value:,.1f} GB"
 
 
 def loc_audit(project_path: str, *, include_config: bool = False, top: int = 20) -> dict:
@@ -74,14 +89,17 @@ def loc_audit(project_path: str, *, include_config: bool = False, top: int = 20)
             per_language.setdefault(language, Counter()).update(counts)
             files.append({"path": str(file_path.relative_to(root)), "language": language, **counts})
     files.sort(key=lambda item: (item["code"], item["total"]), reverse=True)
+    by_size = sorted(files, key=lambda item: (item["bytes"], item["total"]), reverse=True)
     totals = Counter()
     for value in per_language.values(): totals.update(value)
     return {
         "ok": True, "project": str(root), "include_config": include_config,
         "excluded_directories": sorted(excluded), "files": len(files),
         "total": dict(totals),
+        "bytes": sum(item["bytes"] for item in files),
         "languages": {language: {"files": sum(1 for file in files if file["language"] == language), **dict(counts)} for language, counts in sorted(per_language.items())},
         "largest_files": files[:top],
+        "largest_files_by_size": by_size[:top],
     }
 
 
@@ -91,10 +109,13 @@ def print_loc(report: dict) -> None:
         return
     total = report["total"]
     print(f"\n=== LOC Audit: {Path(report['project']).name} ===")
-    print(f"Files: {report['files']:,}; total lines: {total.get('total', 0):,}; code: {total.get('code', 0):,}; blank: {total.get('blank', 0):,}; comment-only: {total.get('comment', 0):,}")
+    print(f"Files: {report['files']:,}; total lines: {total.get('total', 0):,}; code: {total.get('code', 0):,}; blank: {total.get('blank', 0):,}; comment-only: {total.get('comment', 0):,}; size: {_human_bytes(report.get('bytes', 0))}")
     print("\nBy language:")
     for language, counts in report["languages"].items():
         print(f"  {language:<14} files={counts['files']:>5,} code={counts.get('code',0):>8,} total={counts.get('total',0):>8,}")
     print("\nLargest source files by code LOC:")
     for item in report["largest_files"]:
         print(f"  {item['code']:>7,} code / {item['total']:>7,} total  {item['path']}")
+    print("\nLargest source files by size:")
+    for item in report.get("largest_files_by_size", []):
+        print(f"  {_human_bytes(item['bytes']):>9} / {item['total']:>7,} lines  {item['path']}")

@@ -260,7 +260,13 @@ environment variable for unattended runs. See
 
 ### `loc`
 
-Source line-count audit. Reports physical, code, blank and comment-only lines.
+Source line-count audit. Reports physical, code, blank and comment-only lines,
+the size of the tree in bytes, and the largest files in it.
+
+Use it to find the files that are too large to work with: the report ranks the
+files both by code lines and by size, and the two rankings differ. A file can
+be the largest in the tree without holding the most lines, and that is exactly
+the file a size audit exists to find.
 
 Exactly one of `--path` or `--project` is required.
 

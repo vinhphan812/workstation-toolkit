@@ -259,6 +259,27 @@ def test_the_architecture_document_names_only_files_that_exist():
             f"architecture names a missing file: {relative}")
 
 
+def test_the_architecture_source_tree_table_matches_the_tree():
+    """The recorded tree size must match the tree it describes.
+
+    A table that drifts from the code is a claim the document cannot support,
+    and nobody notices until someone reads it as current.
+    """
+    from workstation.modules.loc import loc_audit
+
+    text = _read(ARCHITECTURE)
+    rows = re.findall(r"(?m)^\|\s*`([A-Za-z0-9_./-]+/)`\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|$", text)
+    assert rows, "the architecture document must record the source tree size"
+    for relative, files, lines in rows:
+        path = ROOT / relative
+        assert path.is_dir(), f"the tree table names a missing directory: {relative}"
+        report = loc_audit(str(path))
+        assert report["files"] == int(files), (
+            f"{relative} holds {report['files']} files, the document says {files}")
+        assert report["total"]["total"] == int(lines), (
+            f"{relative} holds {report['total']['total']} lines, the document says {lines}")
+
+
 def test_the_architecture_document_describes_every_module():
     """Every module of the toolkit must have a row in the architecture tables."""
     text = _read(ARCHITECTURE)
