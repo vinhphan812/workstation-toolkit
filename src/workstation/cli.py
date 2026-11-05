@@ -309,6 +309,8 @@ def cmd_schedule(args):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="workstation", description="Cross-platform workstation diagnostic and maintenance toolkit")
     parser.add_argument("--json", action="store_true", help="Write one JSON document to stdout; send human-readable output to stderr")
+    from workstation import __version__
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--save-report", action="store_true", help="Write timestamped JSON and Markdown reports")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("diagnose", help="Full system diagnostic").set_defaults(func=cmd_diagnose)

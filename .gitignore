@@ -30,3 +30,6 @@ venv/
 
 # Generated documentation site
 site/
+
+# PyInstaller build outputs
+*.spec
