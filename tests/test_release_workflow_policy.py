@@ -62,7 +62,7 @@ def test_only_release_publish_job_can_write_repository_contents():
     write_jobs = [name for name, job in jobs.items()
                   if job.get("permissions", {}).get("contents") == "write"]
     assert write_jobs == ["publish"]
-    assert jobs["publish"].get("needs") == "build"
+    assert jobs["publish"].get("needs") == ["build", "build-windows-executable"]
     assert all(value != "write" for name, job in jobs.items() if name != "publish"
                for value in (job.get("permissions") or {}).values())
 
